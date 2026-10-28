@@ -1,3 +1,7 @@
+.plan {
+  --plan-pad: 28px;
+}
+
 .plan-state {
   color: var(--color-gray);
 }
@@ -134,7 +138,9 @@
 }
 
 /* Let the plan use the full width instead of the layout's 1240px cap */
-.app-layout__content:has(.plan) { max-width: none; }
+.app-layout__content:has(.plan) {
+  max-width: none;
+}
 
 @media (max-width: 900px) {
   .plan__summary {
@@ -144,7 +150,7 @@
 
 /* Common styles shared by every plan tab (cards, fields, grid, footer). */
 .plan-card {
-  padding: 28px;
+  padding: var(--plan-pad);
   border: 1px solid var(--color-light-gray);
   border-radius: var(--radius);
   background: var(--color-white);
@@ -172,7 +178,7 @@
 }
 
 .plan-divider {
-  margin: 28px -28px;
+  margin: 28px calc(-1 * var(--plan-pad));
   border: 0;
   border-top: 1px solid var(--color-light-gray);
 }
@@ -257,8 +263,8 @@
 .plan-footer {
   display: flex;
   justify-content: flex-end;
-  margin: 28px -28px -28px;
-  padding: 18px 28px;
+  margin: 28px calc(-1 * var(--plan-pad)) calc(-1 * var(--plan-pad));
+  padding: 18px var(--plan-pad);
   border-top: 1px solid var(--color-light-gray);
 }
 
@@ -281,67 +287,532 @@
 }
 
 /* Income tab */
-.plan-card--flush { padding: 0; overflow: hidden; }
-.plan-card__pad { padding: 28px 28px 20px; }
-.plan-footer--split { justify-content: space-between; margin: 0; }
-
-.income__head { display: flex; justify-content: space-between; gap: 20px; }
-.income__totals { display: flex; gap: 28px; text-align: right; }
-.income__totals span { display: block; font-size: 11px; font-weight: 700; letter-spacing: 0.08em; color: var(--color-gray); }
-.income__totals strong { display: block; margin-top: 6px; font-size: 22px; }
-
-.income__bar { display: flex; height: 10px; overflow: hidden; border-radius: 99px; background: #e8e4dc; }
-.income__bar i { display: block; height: 100%; }
-.income__bar-note { margin: 12px 0 0; font-size: 12px; color: var(--color-gray); }
-
-.income__table { background: #faf9f6; }
-.income__row {
-  display: grid; grid-template-columns: 1fr 200px 140px 220px; align-items: center; gap: 20px;
-  padding: 14px 28px; border-top: 1px solid var(--color-light-gray); background: var(--color-white);
+.plan-card--flush {
+  padding: 0;
+  overflow: hidden;
 }
-.income__row--head {
-  padding: 14px 28px; background: #faf9f6; border-top: 0;
-  font-size: 11px; font-weight: 700; letter-spacing: 0.08em; color: var(--color-gray);
+
+.plan-card__pad {
+  padding: var(--plan-pad) var(--plan-pad) 20px;
 }
-.income__row--head span:nth-child(n+2), .income__annual { text-align: right; }
-.income__row--head span:last-child { text-align: right; }
-.income__row--total { background: var(--color-blue); color: var(--color-white); border-top: 0; padding: 14px 28px; }
-.income__row--total > :nth-child(n+2) { text-align: right; }
 
-.income__source { display: flex; align-items: center; gap: 12px; }
-.income__source strong { display: block; font-size: 14px; }
-.income__source small { font-size: 12px; color: var(--color-gray); }
-.income__icon { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 10px; }
-
-.income__amount {
-  display: flex; align-items: center; gap: 8px; padding: 0 14px; height: 42px;
-  border: 1px solid var(--color-light-gray); border-radius: var(--radius); background: var(--color-white);
+.plan-footer--split {
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0;
+  padding: 18px var(--plan-pad);
 }
-.income__amount em { font-style: normal; font-size: 13px; color: var(--color-gray); }
-.income__amount input { flex: 1; min-width: 0; border: 0; outline: 0; text-align: right; font: 600 14px var(--font-main); }
-.income__amount:focus-within { border-color: var(--color-yellow); box-shadow: 0 0 0 3px rgba(194, 144, 53, 0.18); }
-.income__annual { color: var(--color-gray); font-size: 13px; }
 
-.income__share { display: flex; align-items: center; justify-content: flex-end; gap: 14px; font-size: 13px; color: var(--color-gray); }
-.income__share i { width: 70px; height: 4px; overflow: hidden; border-radius: 99px; background: #e8e4dc; }
-.income__share b { display: block; height: 100%; }
-
-.income__note {
-  display: flex; align-items: center; gap: 8px; margin: 0; padding: 14px 28px;
-  font-size: 13px; color: var(--color-gray); background: var(--color-white);
+.income__head {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
 }
-.income__note svg { color: var(--color-yellow); flex-shrink: 0; }
 
-.tone--blue { background: #3b5bdb; } .tone--yellow { background: #c29035; } .tone--purple { background: #7048e8; }
-.tone--green { background: #2f9e6b; } .tone--red { background: #e8590c; }
-.tone-bg--blue { background: #e7ecfb; color: #3b5bdb; } .tone-bg--yellow { background: #f8eed9; color: #c29035; }
-.tone-bg--purple { background: #eee8fb; color: #7048e8; } .tone-bg--green { background: #e1f3ea; color: #2f9e6b; }
-.tone-bg--red { background: #fde9df; color: #e8590c; }
+.income__totals {
+  display: flex;
+  gap: 28px;
+  text-align: right;
+}
+
+.income__totals span {
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--color-gray);
+}
+
+.income__totals strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 22px;
+}
+
+.income__bar {
+  display: flex;
+  height: 10px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: #e8e4dc;
+}
+
+.income__bar i {
+  display: block;
+  height: 100%;
+}
+
+.income__bar-note {
+  margin: 12px 0 0;
+  font-size: 12px;
+  color: var(--color-gray);
+}
+
+.plan-table {
+  background: #faf9f6;
+}
+
+.plan-row {
+  display: grid;
+  grid-template-columns: 1fr 200px 140px 220px;
+  align-items: center;
+  gap: 20px;
+  padding: 14px var(--plan-pad);
+  border-top: 1px solid var(--color-light-gray);
+  background: var(--color-white);
+}
+
+.plan-row--head {
+  padding: 14px var(--plan-pad);
+  background: #faf9f6;
+  border-top: 0;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--color-gray);
+}
+
+.plan-row--head span:nth-child(n+2),
+.plan-annual {
+  text-align: right;
+}
+
+.plan-row--head span:last-child {
+  text-align: right;
+}
+
+.plan-row--total {
+  background: var(--color-blue);
+  color: var(--color-white);
+  border-top: 0;
+  padding: 14px var(--plan-pad);
+}
+
+.plan-row--total> :nth-child(n+2) {
+  text-align: right;
+}
+
+.plan-source {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.plan-source strong {
+  display: block;
+  font-size: 14px;
+}
+
+.plan-source small {
+  font-size: 12px;
+  color: var(--color-gray);
+}
+
+.plan-icon {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+}
+
+.plan-amount {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px;
+  height: 42px;
+  border: 1px solid var(--color-light-gray);
+  border-radius: var(--radius);
+  background: var(--color-white);
+}
+
+.plan-amount em {
+  font-style: normal;
+  font-size: 13px;
+  color: var(--color-gray);
+}
+
+.plan-amount input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  text-align: right;
+  font: 600 14px var(--font-main);
+}
+
+.plan-amount:focus-within {
+  border-color: var(--color-yellow);
+  box-shadow: 0 0 0 3px rgba(194, 144, 53, 0.18);
+}
+
+.plan-annual {
+  color: var(--color-gray);
+  font-size: 13px;
+}
+
+.plan-share {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 14px;
+  font-size: 13px;
+  color: var(--color-gray);
+}
+
+.plan-share i {
+  width: 70px;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: #e8e4dc;
+}
+
+.plan-share b {
+  display: block;
+  height: 100%;
+}
+
+.plan-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 14px var(--plan-pad);
+  font-size: 13px;
+  color: var(--color-gray);
+  background: var(--color-white);
+}
+
+.plan-note svg {
+  color: var(--color-yellow);
+  flex-shrink: 0;
+}
+
+.tone--blue {
+  background: #3b5bdb;
+}
+
+.tone--yellow {
+  background: #c29035;
+}
+
+.tone--purple {
+  background: #7048e8;
+}
+
+.tone--green {
+  background: #2f9e6b;
+}
+
+.tone--red {
+  background: #e8590c;
+}
+
+.tone-bg--blue {
+  background: #e7ecfb;
+  color: #3b5bdb;
+}
+
+.tone-bg--yellow {
+  background: #f8eed9;
+  color: #c29035;
+}
+
+.tone-bg--purple {
+  background: #eee8fb;
+  color: #7048e8;
+}
+
+.tone-bg--green {
+  background: #e1f3ea;
+  color: #2f9e6b;
+}
+
+.tone-bg--red {
+  background: #fde9df;
+  color: #e8590c;
+}
 
 @media (max-width: 900px) {
-  .income__head { flex-direction: column; }
-  .income__totals { text-align: left; }
-  .income__row { grid-template-columns: 1fr 1fr; gap: 10px 16px; }
-  .income__row--head { display: none; }
-  .income__share { justify-content: flex-start; }
+  .income__head {
+    flex-direction: column;
+  }
+
+  .income__totals {
+    text-align: left;
+  }
+
+  .plan-row {
+    grid-template-columns: 1fr 1fr;
+    gap: 10px 16px;
+  }
+
+  .plan-row--head {
+    display: none;
+  }
+
+  .plan-share {
+    justify-content: flex-start;
+  }
 }
+
+/* Expenses tab (reuses the income table rows) */
+.exp__cat {
+  width: 100%;
+  border: 0;
+  border-top: 1px solid var(--color-light-gray);
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.exp__cat .plan-source>span:last-child strong {
+  display: block;
+  font-size: 14px;
+}
+
+.exp__cat .plan-source>span:last-child small {
+  display: block;
+  font-size: 12px;
+  color: var(--color-gray);
+}
+
+.exp__cat .plan-share strong {
+  color: var(--color-black);
+}
+
+.exp__chevron {
+  display: grid;
+  place-items: center;
+  color: var(--color-gray);
+}
+
+.exp__num {
+  text-align: right;
+}
+
+.exp__item {
+  background: #faf9f6;
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+.exp__item .plan-source {
+  padding-left: 28px;
+}
+
+.exp__index {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: #efede7;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-gray);
+}
+
+.exp__surplus {
+  font-size: 13px;
+}
+
+.exp__surplus strong {
+  text-align: right;
+}
+
+.amount--surplus {
+  color: #2f9e6b;
+}
+
+.amount--deficit {
+  color: var(--color-error);
+}
+
+/* Match the reference: labels are medium weight, only the figures are bold */
+.plan-source strong,
+.exp__cat .plan-source>span:last-child strong {
+  font-weight: 500;
+  color: #1a1f2b;
+}
+
+.plan-row--total>strong:first-child {
+  font-size: 18px;
+  font-weight: 500;
+}
+
+.exp__cat .plan-share strong {
+  font-weight: 600;
+}
+
+.exp__surplus>span:first-child {
+  color: #1a1f2b;
+  font-weight: 400;
+}
+
+/* ---- Mobile / small screens ---- */
+@media (max-width: 900px) {
+  .plan__stat--dark {
+    grid-column: 1 / -1;
+  }
+
+  .plan__header {
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 640px) {
+  .plan {
+    --plan-pad: 16px;
+  }
+
+  .plan__header {
+    gap: 10px;
+    margin-bottom: 18px;
+  }
+
+  .plan__header h1 {
+    font-size: 18px;
+  }
+
+  .plan__avatar {
+    width: 36px;
+    height: 36px;
+  }
+
+  .plan__summary {
+    gap: 10px;
+  }
+
+  .plan__stat {
+    padding: 12px 14px;
+  }
+
+  .plan__stat strong {
+    font-size: 18px;
+  }
+
+  .plan__tab {
+    padding: 8px 12px;
+  }
+
+  .plan-card h2 {
+    font-size: 20px;
+  }
+
+  .plan-card__sub {
+    margin-bottom: 16px;
+  }
+
+  .income__totals {
+    gap: 20px;
+  }
+
+  .income__totals strong {
+    font-size: 18px;
+  }
+
+  /* Table rows become small cards: name on top, amounts below */
+  .plan-row {
+    grid-template-columns: 1fr 1fr;
+    gap: 10px 12px;
+    padding: 12px var(--plan-pad);
+  }
+
+  .plan-row> :first-child {
+    grid-column: 1 / -1;
+  }
+
+  .plan-row> :nth-child(4) {
+    grid-column: 1 / -1;
+  }
+
+  .plan-annual,
+  .plan-row--total> :nth-child(3) {
+    text-align: right;
+  }
+
+  .plan-annual::before {
+    content: 'Annual ';
+    font-size: 11px;
+  }
+
+  .plan-share {
+    justify-content: flex-start;
+  }
+
+  .plan-share i {
+    flex: 1;
+    width: auto;
+  }
+
+  .plan-row--total> :nth-child(4),
+  .exp__surplus>strong {
+    text-align: right;
+  }
+
+  .exp__surplus>span:empty {
+    display: none;
+  }
+
+  .exp__item .plan-source {
+    padding-left: 4px;
+  }
+
+  .exp__num {
+    text-align: left;
+  }
+
+  .plan-footer {
+    flex-wrap: wrap;
+  }
+
+  .plan-footer .plan-next {
+    flex: 1 1 140px;
+    justify-content: center;
+  }
+}
+/* Savings tab */
+.sav__calc { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; align-items: center; gap: 16px; }
+.sav__calc i { font-style: normal; color: var(--color-gray); }
+.sav__box { padding: 18px 20px; border: 1px solid var(--color-light-gray); border-radius: var(--radius); background: #faf9f6; }
+.sav__box span { display: block; font-size: 11px; font-weight: 700; letter-spacing: 0.08em; color: var(--color-gray); }
+.sav__box strong { display: block; margin-top: 8px; font-size: 22px; }
+.sav__box--dark { background: var(--color-blue); border-color: var(--color-blue); }
+.sav__box--dark span { color: var(--color-yellow); }
+.sav__box--dark strong { color: var(--color-white); }
+
+.sav__surplus {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  padding: 22px var(--plan-pad); background: #e3f1e9; border-bottom: 1px solid var(--color-light-gray);
+}
+.sav__surplus h3 { margin: 0; font-size: 20px; font-weight: 500; }
+.sav__surplus p { margin: 4px 0 0; font-size: 13px; color: var(--color-gray); }
+.sav__surplus strong { font-size: 26px; color: #2f9e6b; white-space: nowrap; }
+.sav__surplus small { font-size: 13px; font-weight: 400; color: var(--color-gray); }
+.sav__surplus--deficit { background: #fbe9e7; }
+.sav__surplus--deficit strong { color: var(--color-error); }
+
+@media (max-width: 640px) {
+  .sav__calc { grid-template-columns: 1fr; gap: 8px; }
+  .sav__calc i { text-align: center; }
+  .sav__surplus { flex-direction: column; align-items: flex-start; }
+}
+
+/* Summary cards */
+.plan__stat { padding: 18px 22px; border-radius: 14px; box-shadow: 0 1px 2px rgba(11, 31, 61, 0.05); }
+.plan__stat-label { display: flex; align-items: center; gap: 8px; }
+.plan__stat-label i { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
+.plan__stat strong { margin-top: 12px; font-size: 24px; }
+.plan__stat small { display: block; margin-top: 10px; font-size: 12px; color: var(--color-gray); }
+.plan__stat-bar { height: 4px; margin-top: 14px; overflow: hidden; border-radius: 99px; background: #e8e4dc; }
+.plan__stat-bar b { display: block; height: 100%; }
+.plan__stat-bar + small { margin-top: 10px; }
+.plan__pct { font-weight: 700; }
+.plan__pct--amber { color: #b7791f; }
+.plan__pct--green { color: #2f9e6b; }
+.plan__stat--dark small { color: #aab4cc; }
+.plan__stat--dark .plan__stat-label { color: #aab4cc; }

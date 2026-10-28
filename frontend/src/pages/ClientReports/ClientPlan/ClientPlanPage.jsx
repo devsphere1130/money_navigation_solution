@@ -3,14 +3,16 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { ArrowLeft } from 'lucide-react';
 import { listClients } from '../../../services/clientService.js';
 import { TABS } from './tabs.js';
+import { inr, pct } from './format.js';
 import { incomeTotal } from './tabs/IncomeTab.jsx';
+import { expensesTotal } from './tabs/ExpensesTab.jsx';
 import './ClientPlan.css';
 
 const today = () => new Date().toISOString().slice(0, 10);
 const titleCase = (v) => v.toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
 const initials = (name) => name.split(' ').slice(0, 2).map((w) => w[0]).join('').toUpperCase();
 
-const SUMMARY = ['INCOME / MO', 'EXPENSES / MO', 'SAVINGS / MO', 'TOTAL ASSETS', 'NET WORTH'];
+const ratio = (n, of) => (of > 0 ? Math.max(0, (n / of) * 100) : 0);
 
 export default function ClientPlanPage() {
   const { id } = useParams();
@@ -20,6 +22,8 @@ export default function ClientPlanPage() {
   const [active, setActive] = useState(0);
   const [info, setInfo] = useState(null);
   const [income, setIncome] = useState({ salary: '', bonus: '', business: '', rental: '', investment: '' });
+  const [expenses, setExpenses] = useState({});
+  const [savings, setSavings] = useState({});
 
   useEffect(() => {
     listClients()
@@ -47,7 +51,35 @@ export default function ClientPlanPage() {
   const prev = TABS[active - 1];
   const next = TABS[active + 1];
   const name = `${client.title}. ${titleCase(client.full_name)}`;
-  const summaryValues = { 'INCOME / MO': incomeTotal(income) };
+  const incomeAmount = incomeTotal(income);
+  const expensesAmount = expensesTotal(expenses);
+  const savingsAmount = incomeAmount - expensesAmount;
+  // Assets and liabilities come from tabs that are not built yet.
+  const assets = 0;
+  const liabilities = 0;
+  const netWorth = assets - liabilities;
+
+  const cards = [
+    {
+      label: 'INCOME / MO', color: '#2b3f86', value: incomeAmount,
+      note: `₹${((incomeAmount * 12) / 100000).toFixed(1)} L per year`,
+    },
+    {
+      label: 'EXPENSES / MO', color: '#b7791f', value: expensesAmount,
+      bar: ratio(expensesAmount, incomeAmount), barClass: 'tone--yellow',
+      note: <><b className="plan__pct plan__pct--amber">{pct(ratio(expensesAmount, incomeAmount))}</b> of income</>,
+    },
+    {
+      label: 'SAVINGS / MO', color: '#2f9e6b', value: savingsAmount,
+      bar: ratio(savingsAmount, incomeAmount), barClass: 'tone--green',
+      note: <><b className="plan__pct plan__pct--green">{pct(ratio(savingsAmount, incomeAmount))}</b> savings rate</>,
+    },
+    { label: 'TOTAL ASSETS', color: '#c29035', value: assets, note: `Liabilities ${inr(liabilities)}` },
+    {
+      label: 'NET WORTH', color: '#c29035', value: netWorth, dark: true,
+      note: `≈ ₹${(netWorth / 10000000).toFixed(2)} Cr · ${pct(ratio(netWorth, assets))} of assets`,
+    },
+  ];
 
   return (
     <div className="plan">
@@ -63,10 +95,14 @@ export default function ClientPlanPage() {
       </header>
 
       <section className="plan__summary">
-        {SUMMARY.map((label) => (
-          <div key={label} className={`plan__stat${label === 'NET WORTH' ? ' plan__stat--dark' : ''}`}>
-            <span>{label}</span>
-            <strong>₹{(summaryValues[label] || 0).toLocaleString('en-IN')}</strong>
+        {cards.map((c) => (
+          <div key={c.label} className={`plan__stat${c.dark ? ' plan__stat--dark' : ''}`}>
+            <span className="plan__stat-label"><i style={{ background: c.color }} />{c.label}</span>
+            <strong>{inr(c.value)}</strong>
+            {c.bar !== undefined && (
+              <div className="plan__stat-bar"><b className={c.barClass} style={{ width: `${Math.min(c.bar, 100)}%` }} /></div>
+            )}
+            <small>{c.note}</small>
           </div>
         ))}
       </section>
@@ -90,6 +126,12 @@ export default function ClientPlanPage() {
           onChange={setInfo}
           income={income}
           onIncomeChange={setIncome}
+          expenses={expenses}
+          onExpensesChange={setExpenses}
+          savings={savings}
+          onSavingsChange={setSavings}
+          incomeTotal={incomeAmount}
+          expensesAmount={expensesAmount}
           onBack={() => prev && setActive(active - 1)}
           onNext={() => next && setActive(active + 1)}
           prevLabel={prev?.label}
