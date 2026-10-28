@@ -6,6 +6,7 @@ import { TABS } from './tabs.js';
 import { inr, pct } from './format.js';
 import { incomeTotal } from './tabs/IncomeTab.jsx';
 import { expensesTotal } from './tabs/ExpensesTab.jsx';
+import { liabilitiesTotal } from './tabs/LiabilitiesTab.jsx';
 import './ClientPlan.css';
 
 const today = () => new Date().toISOString().slice(0, 10);
@@ -24,6 +25,7 @@ export default function ClientPlanPage() {
   const [income, setIncome] = useState({ salary: '', bonus: '', business: '', rental: '', investment: '' });
   const [expenses, setExpenses] = useState({});
   const [savings, setSavings] = useState({});
+  const [liabilityData, setLiabilityData] = useState({});
 
   useEffect(() => {
     listClients()
@@ -56,7 +58,8 @@ export default function ClientPlanPage() {
   const savingsAmount = incomeAmount - expensesAmount;
   // Assets and liabilities come from tabs that are not built yet.
   const assets = 0;
-  const liabilities = 0;
+  const personalAssets = 0;
+  const liabilities = liabilitiesTotal(liabilityData);
   const netWorth = assets - liabilities;
 
   const cards = [
@@ -128,6 +131,10 @@ export default function ClientPlanPage() {
           onIncomeChange={setIncome}
           expenses={expenses}
           onExpensesChange={setExpenses}
+          liabilities={liabilityData}
+          onLiabilitiesChange={setLiabilityData}
+          assetsTotal={assets}
+          personalAssets={personalAssets}
           savings={savings}
           onSavingsChange={setSavings}
           incomeTotal={incomeAmount}

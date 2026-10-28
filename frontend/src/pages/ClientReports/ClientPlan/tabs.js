@@ -3,6 +3,7 @@ import ClientInfoTab from './tabs/ClientInfoTab.jsx';
 import IncomeTab from './tabs/IncomeTab.jsx';
 import ExpensesTab from './tabs/ExpensesTab.jsx';
 import SavingsTab from './tabs/SavingsTab.jsx';
+import LiabilitiesTab from './tabs/LiabilitiesTab.jsx';
 
 export const TABS = [
   { key: 'client-info', label: 'Client Info', Component: ClientInfoTab },
@@ -10,7 +11,7 @@ export const TABS = [
   { key: 'expenses', label: 'Expenses', Component: ExpensesTab },
   { key: 'savings', label: 'Savings & Investments', Component: SavingsTab },
   { key: 'assets', label: 'Assets' },
-  { key: 'liabilities', label: 'Liabilities & Net Worth' },
+  { key: 'liabilities', label: 'Liabilities & Net Worth', Component: LiabilitiesTab },
   { key: 'insurance', label: 'Insurance' },
   { key: 'goals', label: 'Goals' },
   { key: 'retirement', label: 'Retirement' },
