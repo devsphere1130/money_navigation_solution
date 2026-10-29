@@ -2,7 +2,7 @@ import { CirclePlus, FileText, TrendingUp } from 'lucide-react';
 import { inr } from '../format.js';
 import { AmountInput, ShareCell, TabFooter } from '../PlanParts.jsx';
 
-const INVESTMENTS = [
+export const INVESTMENTS = [
   { key: 'sip', label: 'Mutual fund SIPs', hint: 'Equity, debt & hybrid SIPs', icon: TrendingUp, tone: 'blue' },
   { key: 'policies', label: 'Policies & RDs', hint: 'Endowment / ULIP premiums, recurring deposits', icon: FileText, tone: 'yellow' },
   { key: 'other', label: 'Other investments', hint: 'PPF, NPS, stocks, gold, etc.', icon: CirclePlus, tone: 'green' },

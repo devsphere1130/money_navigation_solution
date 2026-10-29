@@ -19,3 +19,7 @@ async function authed(path, options = {}) {
 export const listClients = () => authed('/clients/');
 
 export const createClient = (payload) => authed('/clients/', { method: 'POST', body: payload });
+
+export const getPlan = (id) => authed(`/clients/${id}/plan/`);
+
+export const savePlan = (id, payload) => authed(`/clients/${id}/plan/`, { method: 'PUT', body: payload });

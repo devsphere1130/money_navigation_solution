@@ -3,7 +3,7 @@ import { CreditCard, House, ShieldCheck, ShoppingBag, Users } from 'lucide-react
 import { inr, pct } from '../format.js';
 import { AmountInput, CategoryRow, ShareCell, TabFooter } from '../PlanParts.jsx';
 
-const CATEGORIES = [
+export const CATEGORIES = [
   {
     key: 'household', label: 'Household', icon: House, tone: 'blue',
     items: [

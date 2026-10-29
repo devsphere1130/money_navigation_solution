@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft } from 'lucide-react';
-import { listClients } from '../../../services/clientService.js';
+import { ArrowLeft, Save } from 'lucide-react';
+import { getPlan, listClients, savePlan } from '../../../services/clientService.js';
+import { fromPlan, toPayload } from './planApi.js';
 import { TABS } from './tabs.js';
 import { inr, pct } from './format.js';
 import { incomeTotal } from './tabs/IncomeTab.jsx';
@@ -15,7 +16,9 @@ const today = () => new Date().toISOString().slice(0, 10);
 const titleCase = (v) => v.toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
 const initials = (name) => name.split(' ').slice(0, 2).map((w) => w[0]).join('').toUpperCase();
 
-const ratio = (n, of) => (of > 0 ? Math.max(0, (n / of) * 100) : 0);
+const DEFAULT_INSURANCE = { years: '40', lifeCover: '', healthCover: '', auto: false };
+
+const ratio =(n, of) => (of > 0 ? Math.max(0, (n / of) * 100) : 0);
 
 export default function ClientPlanPage() {
   const { id } = useParams();
@@ -34,23 +37,39 @@ export default function ClientPlanPage() {
   const [retirement, setRetirement] = useState({
     expense: '', corpus: '', age: '35', retireAge: '60', life: '85', inflation: '6', before: '12', after: '8',
   });
-  const [insurance, setInsurance] = useState({ years: '40', lifeCover: '', healthCover: '', auto: false });
+  const [insurance, setInsurance] = useState(DEFAULT_INSURANCE);
+  const [saved, setSaved] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
 
   useEffect(() => {
     listClients()
-      .then((rows) => {
+      .then(async (rows) => {
         const c = rows.find((r) => String(r.id) === id);
         if (!c) throw new Error('Client plan not found.');
+        const defaults = {
+          info: {
+            clientName: `${c.title.toUpperCase()} ${c.full_name.toUpperCase()}`,
+            spouseName: '',
+            phone: c.mobile || '',
+            email: c.email || '',
+            address: '',
+            planDate: today(),
+            advisorNotes: '',
+          },
+          insurance: DEFAULT_INSURANCE,
+        };
+        const plan = fromPlan(await getPlan(id), defaults);
+        setInfo(plan.info);
+        setIncome(plan.income);
+        setExpenses(plan.expenses);
+        setSavings(plan.savings);
+        setAssetData(plan.assetData);
+        setLiabilityData(plan.liabilityData);
+        setInsurance(plan.insurance);
+        setFamily(plan.family);
+        setSaved(JSON.stringify(plan));
         setClient(c);
-        setInfo({
-          clientName: `${c.title.toUpperCase()} ${c.full_name.toUpperCase()}`,
-          spouseName: '',
-          phone: c.mobile || '',
-          email: c.email || '',
-          address: '',
-          planDate: today(),
-          advisorNotes: '',
-        });
       })
       .catch((err) => setError(err.message));
   }, [id]);
@@ -69,6 +88,24 @@ export default function ClientPlanPage() {
   const personalAssets = personalAssetsTotal(assetData);
   const liabilities = liabilitiesTotal(liabilityData);
   const netWorth = assets - liabilities;
+
+  // Everything the Save button writes to the database (Goals and Retirement are not stored yet).
+  const planState = { info, income, expenses, savings, assetData, liabilityData, insurance, family };
+  const snapshot = JSON.stringify(planState);
+  const dirty = snapshot !== saved;
+
+  const save = async () => {
+    setSaving(true);
+    setSaveError('');
+    try {
+      await savePlan(id, toPayload(planState));
+      setSaved(snapshot);
+    } catch (err) {
+      setSaveError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const cards = [
     {
@@ -101,7 +138,16 @@ export default function ClientPlanPage() {
         <span className="plan__avatar">{initials(client.full_name)}</span>
         <div>
           <p className="plan__crumb">Client Reports / {client.plan_name}</p>
-          <h1>{name}</h1>
+          <h1>
+            {name}
+            <span className={`plan__status${dirty ? '' : ' plan__status--ok'}`}>{dirty ? 'Unsaved changes' : 'All changes saved'}</span>
+          </h1>
+        </div>
+        <div className="plan__actions">
+          {saveError && <p className="plan__error" role="alert">{saveError}</p>}
+          <button type="button" className="plan__save" onClick={save} disabled={saving || !dirty}>
+            <Save size={15} /> {saving ? 'Saving…' : 'Save'}
+          </button>
         </div>
       </header>
 

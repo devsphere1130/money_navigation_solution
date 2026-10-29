@@ -2,7 +2,7 @@ import { Briefcase, Building2, Gift, House, Info, TrendingUp } from 'lucide-reac
 import { inr } from '../format.js';
 import { AmountInput, ShareCell, TabFooter } from '../PlanParts.jsx';
 
-const SOURCES = [
+export const SOURCES = [
   { key: 'salary', label: 'Salary income', hint: 'Husband + wife, net of tax', icon: Briefcase, tone: 'blue' },
   { key: 'bonus', label: 'Annual bonus', hint: 'Husband + wife, monthly equivalent', icon: Gift, tone: 'yellow' },
   { key: 'business', label: 'Business income', hint: 'Profession or business', icon: Building2, tone: 'purple' },

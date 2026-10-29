@@ -3,7 +3,7 @@ import { Building2, Car, Droplet, Gem, Landmark, TrendingUp } from 'lucide-react
 import { inr } from '../format.js';
 import { AmountInput, CategoryRow, ShareCell, TabFooter } from '../PlanParts.jsx';
 
-const CLASSES = [
+export const CLASSES = [
   {
     key: 'liquid', label: 'Liquid assets', icon: Droplet, tone: 'blue',
     items: ['Savings bank', 'Liquid funds', 'Cash in hand'],

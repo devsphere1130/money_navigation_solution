@@ -2,7 +2,7 @@ import { CirclePlus, CreditCard, GraduationCap, House, Car, User } from 'lucide-
 import { inr, pct } from '../format.js';
 import { AmountInput, ShareCell, TabFooter } from '../PlanParts.jsx';
 
-const LIABILITIES = [
+export const LIABILITIES = [
   { key: 'home', label: 'Home loan', hint: 'Outstanding principal', icon: House, tone: 'red' },
   { key: 'vehicle', label: 'Vehicle loan', hint: 'Outstanding principal', icon: Car, tone: 'blue' },
   { key: 'personal', label: 'Personal loan', hint: 'Outstanding principal', icon: User, tone: 'purple' },
