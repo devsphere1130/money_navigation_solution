@@ -53,15 +53,15 @@ function CoverCard({ icon: Icon, title, iconClass, recommended, existing, rows }
 }
 
 export default function InsuranceTab({
-  insurance, onInsuranceChange, incomeTotal, liabilitiesAmount, investibleAmount, members,
+  insurance, onInsuranceChange, incomeTotal, liabilitiesAmount, investibleAmount, members, familyLife, familyHealth,
   onBack, onNext, prevLabel, nextLabel,
 }) {
   const set = (field, value) => onInsuranceChange({ ...insurance, [field]: value });
   const years = Number(insurance.years) || 0;
   const annualIncome = incomeTotal * 12;
-  // With auto-sum on, cover comes from the Family Members tab (not built yet, so none).
-  const lifeExisting = insurance.auto ? 0 : Number(insurance.lifeCover) || 0;
-  const healthExisting = insurance.auto ? 0 : Number(insurance.healthCover) || 0;
+  // With auto-sum on, cover is the total entered on the Family Members tab.
+  const lifeExisting = insurance.auto ? familyLife : Number(insurance.lifeCover) || 0;
+  const healthExisting = insurance.auto ? familyHealth : Number(insurance.healthCover) || 0;
 
   const lifeRecommended = Math.max(0, annualIncome * years + liabilitiesAmount - investibleAmount);
   const floater = HEALTH_BASE + HEALTH_EXTRA * Math.max(members - 1, 0);
@@ -117,7 +117,9 @@ export default function InsuranceTab({
             onClick={() => set('auto', !insurance.auto)}
           ><i /></button>
           <span>Auto-sum existing cover from the Family Members tab</span>
-          {insurance.auto && <small>No family members added yet</small>}
+          {insurance.auto && (
+            <small>{members > 1 ? `Summed across ${members - 1} family member${members === 2 ? '' : 's'}` : 'No family members added yet'}</small>
+          )}
         </div>
       </div>
 

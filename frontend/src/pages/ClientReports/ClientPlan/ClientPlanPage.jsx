@@ -6,6 +6,7 @@ import { TABS } from './tabs.js';
 import { inr, pct } from './format.js';
 import { incomeTotal } from './tabs/IncomeTab.jsx';
 import { expensesTotal } from './tabs/ExpensesTab.jsx';
+import { familyCover } from './tabs/FamilyTab.jsx';
 import { liabilitiesTotal } from './tabs/LiabilitiesTab.jsx';
 import { assetsTotal, investibleAssetsTotal, personalAssetsTotal } from './tabs/AssetsTab.jsx';
 import './ClientPlan.css';
@@ -29,6 +30,10 @@ export default function ClientPlanPage() {
   const [liabilityData, setLiabilityData] = useState({});
   const [assetData, setAssetData] = useState({});
   const [goals, setGoals] = useState([]);
+  const [family, setFamily] = useState([]);
+  const [retirement, setRetirement] = useState({
+    expense: '', corpus: '', age: '35', retireAge: '60', life: '85', inflation: '6', before: '12', after: '8',
+  });
   const [insurance, setInsurance] = useState({ years: '40', lifeCover: '', healthCover: '', auto: false });
 
   useEffect(() => {
@@ -134,6 +139,9 @@ export default function ClientPlanPage() {
           onIncomeChange={setIncome}
           expenses={expenses}
           onExpensesChange={setExpenses}
+          displayName={name}
+          retirement={retirement}
+          onRetirementChange={setRetirement}
           goals={goals}
           onGoalsChange={setGoals}
           surplusAmount={savingsAmount}
@@ -141,7 +149,11 @@ export default function ClientPlanPage() {
           onInsuranceChange={setInsurance}
           liabilitiesAmount={liabilities}
           investibleAmount={investibleAssetsTotal(assetData)}
-          members={1} /* family size: client only, until the Family Members tab exists */
+          members={1 + family.length}
+          family={family}
+          onFamilyChange={setFamily}
+          familyLife={familyCover(family, 'lifeCover')}
+          familyHealth={familyCover(family, 'healthCover')}
           assetData={assetData}
           onAssetsChange={setAssetData}
           liabilities={liabilityData}

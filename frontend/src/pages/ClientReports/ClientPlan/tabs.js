@@ -7,6 +7,9 @@ import AssetsTab from './tabs/AssetsTab.jsx';
 import LiabilitiesTab from './tabs/LiabilitiesTab.jsx';
 import InsuranceTab from './tabs/InsuranceTab.jsx';
 import GoalsTab from './tabs/GoalsTab.jsx';
+import RetirementTab from './tabs/RetirementTab.jsx';
+import FamilyTab from './tabs/FamilyTab.jsx';
+import SummaryTab from './tabs/SummaryTab.jsx';
 
 export const TABS = [
   { key: 'client-info', label: 'Client Info', Component: ClientInfoTab },
@@ -17,7 +20,7 @@ export const TABS = [
   { key: 'liabilities', label: 'Liabilities & Net Worth', Component: LiabilitiesTab },
   { key: 'insurance', label: 'Insurance', Component: InsuranceTab },
   { key: 'goals', label: 'Goals', Component: GoalsTab },
-  { key: 'retirement', label: 'Retirement' },
-  { key: 'family', label: 'Family Members' },
-  { key: 'summary', label: 'Summary' },
+  { key: 'retirement', label: 'Retirement', Component: RetirementTab },
+  { key: 'family', label: 'Family Members', Component: FamilyTab },
+  { key: 'summary', label: 'Summary', Component: SummaryTab },
 ];

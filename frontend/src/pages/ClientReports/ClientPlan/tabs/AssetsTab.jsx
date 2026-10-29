@@ -42,6 +42,7 @@ const sum = (cls, data) => cls.items.reduce((s, _, i) => s + (Number(data[itemKe
 
 export const assetsTotal = (data) => CLASSES.reduce((s, c) => s + sum(c, data), 0);
 export const personalAssetsTotal = (data) => sum(CLASSES.find((c) => c.key === 'personal'), data);
+export const assetBreakdown = (data) => CLASSES.map((c) => ({ label: c.label.replace(' assets', ''), tone: c.tone, value: sum(c, data) }));
 
 // Liquid, debt, equity and gold - what the family could draw on to cover a life-cover need.
 const INVESTIBLE = ['liquid', 'debt', 'equity', 'gold'];

@@ -1,19 +1,12 @@
 import { Flag, Pencil, Plus, Target, Trash2 } from 'lucide-react';
-import { inr, pct } from '../format.js';
-import { TabFooter } from '../PlanParts.jsx';
+import { inr, pct, sipFactor } from '../format.js';
+import { NumberBox, PlanChart, TabFooter } from '../PlanParts.jsx';
 
 const PRIORITIES = ['High', 'Medium', 'Low'];
 const RANK = { High: 3, Medium: 2, Low: 1 };
 const NEW_GOAL = { name: 'New goal', cost: '1000000', years: '5', inflation: '6', ret: '10', savings: '', sip: '', priority: 'Medium' };
 
-const digits = (v, max = 12) => v.replace(/\D/g, '').slice(0, max);
 const num = (v) => Number(v) || 0;
-
-// SIP growth factor: monthly compounding, instalments paid at the start of each month.
-const sipFactor = (rate, months) => {
-  const m = rate / 12;
-  return m ? (((1 + m) ** months - 1) / m) * (1 + m) : months;
-};
 
 // Everything a goal card shows, worked out from its inputs.
 function calc(g) {
@@ -34,61 +27,16 @@ function calc(g) {
   };
 }
 
-const lakhs = (v, crore) => (crore ? `${(v / 1e7).toFixed(2)}Cr` : v ? `${(v / 1e5).toFixed(1)}L` : '0');
-
-// Projected corpus vs inflation-adjusted target, year by year.
-function GoalChart({ years, corpusAt, targetAt }) {
-  const W = 360, H = 250, L = 44, R = 14, T = 12, B = 30;
-  const ts = Array.from({ length: years + 1 }, (_, t) => t);
-  const max = Math.max(...ts.map((t) => Math.max(corpusAt(t), targetAt(t))), 1);
-  const x = (t) => L + (years ? (t / years) * (W - L - R) : 0);
-  const y = (v) => T + (1 - v / max) * (H - T - B);
-  const line = (fn) => ts.map((t) => `${x(t)},${y(fn(t))}`).join(' ');
-  const step = Math.ceil(years / 10) || 1;
-
-  return (
-    <svg className="goal__chart" viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Projected corpus against target by year">
-      {[0, 1, 2, 3, 4].map((i) => (
-        <g key={i}>
-          <line x1={L} x2={W - R} y1={y((max / 4) * i)} y2={y((max / 4) * i)} className="goal__grid" />
-          <text x={L - 8} y={y((max / 4) * i) + 4} textAnchor="end">{lakhs((max / 4) * i, max >= 1e7)}</text>
-        </g>
-      ))}
-      {ts.filter((t) => t % step === 0 || t === years).map((t) => (
-        <text key={t} x={x(t)} y={H - 8} textAnchor="middle">{t}</text>
-      ))}
-      <polyline points={line(targetAt)} className="goal__line goal__line--target" />
-      <polyline points={line(corpusAt)} className="goal__line goal__line--corpus" />
-      <circle cx={x(years)} cy={y(targetAt(years))} r="4" className="goal__dot goal__dot--target" />
-      <circle cx={x(years)} cy={y(corpusAt(years))} r="4" className="goal__dot goal__dot--corpus" />
-    </svg>
-  );
-}
-
-// A labelled number box with a ₹ prefix or a unit suffix.
-function Box({ label, value, onChange, prefix, suffix, max }) {
-  return (
-    <label className="plan-field">
-      <span>{label}</span>
-      <div className="plan-input">
-        {prefix && <em>{prefix}</em>}
-        <input type="text" inputMode="numeric" placeholder="0" value={prefix && value ? Number(value).toLocaleString('en-IN') : value} onChange={(e) => onChange(digits(e.target.value, max))} />
-        {suffix && <em>{suffix}</em>}
-      </div>
-    </label>
-  );
-}
-
 function GoalCard({ goal, c, first, onChange, onDelete }) {
   const set = (field) => (value) => onChange({ ...goal, [field]: value });
   const done = c.shortfall <= 0;
 
   return (
-    <article className={`goal${first ? ' goal--first' : ''}`}>
-      <header className="goal__head">
+    <article className={`plan-item${first ? ' plan-item--first' : ''}`}>
+      <header className="plan-item__head">
         <span className="plan-icon tone-bg--blue"><Target size={18} /></span>
         <input
-          className="goal__name" type="text" maxLength={60} aria-label="Goal name"
+          className="plan-item__name" type="text" maxLength={60} aria-label="Goal name"
           value={goal.name} onChange={(e) => set('name')(e.target.value)}
         />
         {first && <span className="goal__first"><Flag size={12} /> Fund first</span>}
@@ -96,17 +44,17 @@ function GoalCard({ goal, c, first, onChange, onDelete }) {
           {PRIORITIES.map((p) => <option key={p}>{p}</option>)}
         </select>
         <span className={`ins__badge ${done ? 'ins__badge--ok' : 'ins__badge--bad'}`}>{done ? 'On track' : 'Behind'}</span>
-        <button type="button" className="goal__delete" onClick={onDelete} aria-label={`Delete ${goal.name}`}><Trash2 size={16} /></button>
+        <button type="button" className="plan-item__delete" onClick={onDelete} aria-label={`Delete ${goal.name}`}><Trash2 size={16} /></button>
       </header>
 
       <div className="goal__body">
         <div className="goal__inputs">
-          <Box label="Cost today" prefix="₹" value={goal.cost} onChange={set('cost')} />
-          <Box label="Years to goal" suffix="yrs" value={goal.years} onChange={set('years')} max={2} />
-          <Box label="Inflation" suffix="%" value={goal.inflation} onChange={set('inflation')} max={2} />
-          <Box label="Expected return" suffix="%" value={goal.ret} onChange={set('ret')} max={2} />
-          <Box label="Current savings" prefix="₹" value={goal.savings} onChange={set('savings')} />
-          <Box label="Monthly SIP" prefix="₹" value={goal.sip} onChange={set('sip')} />
+          <NumberBox label="Cost today" prefix="₹" value={goal.cost} onChange={set('cost')} />
+          <NumberBox label="Years to goal" suffix="yrs" value={goal.years} onChange={set('years')} max={2} />
+          <NumberBox label="Inflation" suffix="%" value={goal.inflation} onChange={set('inflation')} max={2} />
+          <NumberBox label="Expected return" suffix="%" value={goal.ret} onChange={set('ret')} max={2} />
+          <NumberBox label="Current savings" prefix="₹" value={goal.savings} onChange={set('savings')} />
+          <NumberBox label="Monthly SIP" prefix="₹" value={goal.sip} onChange={set('sip')} />
         </div>
 
         <div className="goal__result">
@@ -126,12 +74,12 @@ function GoalCard({ goal, c, first, onChange, onDelete }) {
         </div>
 
         <div className="goal__plot">
-          <div className="goal__legend">
-            <span className="goal__key--corpus">Projected corpus</span>
-            <span className="goal__key--target">Target</span>
+          <div className="plan-legend">
+            <span className="plan-key--corpus">Projected corpus</span>
+            <span className="plan-key--target">Target</span>
             <span>Years</span>
           </div>
-          <GoalChart years={c.years} corpusAt={c.corpusAt} targetAt={c.targetAt} />
+          <PlanChart years={c.years} lines={[{ at: c.targetAt, cls: 'target' }, { at: c.corpusAt, cls: 'corpus' }]} />
         </div>
       </div>
     </article>
@@ -163,17 +111,17 @@ export default function GoalsTab({ goals, onGoalsChange, surplusAmount, onBack, 
 
   return (
     <section className="plan-card plan-card--flush">
-      <div className="plan-card__pad goal__top">
+      <div className="plan-card__pad plan-top">
         <div>
           <h2>Goals</h2>
           <p className="plan-card__sub">Each life goal against its inflation-adjusted target.</p>
         </div>
-        <button type="button" className="goal__add" onClick={() => onGoalsChange([...goals, { ...NEW_GOAL, id: Date.now() }])}>
+        <button type="button" className="plan-add" onClick={() => onGoalsChange([...goals, { ...NEW_GOAL, id: Date.now() }])}>
           <Plus size={15} /> Add goal
         </button>
       </div>
 
-      <div className="goal__stats">
+      <div className="plan-stats">
         {stats.map((s) => (
           <div key={s.label} className={`plan__stat${s.dark ? ' plan__stat--dark' : ''}`}>
             <span className="plan__stat-label">{s.label}</span>
@@ -193,8 +141,8 @@ export default function GoalsTab({ goals, onGoalsChange, surplusAmount, onBack, 
         </p>
       )}
 
-      <div className="goal__list">
-        {goals.length === 0 && <p className="goal__empty">No goals yet. Click “Add goal” to plan for one.</p>}
+      <div className="plan-item__list">
+        {goals.length === 0 && <p className="plan-item__empty">No goals yet. Click “Add goal” to plan for one.</p>}
         {goals.map((g, i) => (
           <GoalCard
             key={g.id}

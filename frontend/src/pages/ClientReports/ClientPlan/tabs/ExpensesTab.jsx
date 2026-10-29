@@ -52,6 +52,7 @@ const itemKey = (cat, i) => `${cat.key}-${i}`;
 const sum = (cat, expenses) => cat.items.reduce((s, _, i) => s + (Number(expenses[itemKey(cat, i)]) || 0), 0);
 
 export const expensesTotal = (expenses) => CATEGORIES.reduce((s, c)  => s + sum(c, expenses), 0);
+export const expenseBreakdown = (expenses) => CATEGORIES.map((c) => ({ label: c.label, tone: c.tone, value: sum(c, expenses) }));
 
 export default function ExpensesTab({
   expenses, onExpensesChange, incomeTotal, onBack, onNext, prevLabel, nextLabel,
