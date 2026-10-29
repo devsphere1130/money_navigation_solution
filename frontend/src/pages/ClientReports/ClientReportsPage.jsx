@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Plus, Search, User, ArrowRight } from 'lucide-react';
 import NewClientModal from '../../components/clients/NewClientModal.jsx';
 import { listClients } from '../../services/clientService.js';
@@ -44,6 +45,7 @@ export default function ClientReportsPage() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [showModal, setShowModal] = useState(false);
+  const navigate = useNavigate();
 
   useEffect(() => {
     listClients()
@@ -165,7 +167,7 @@ export default function ClientReportsPage() {
               </div>
               <p className="client__advisor">Advisor: {c.advisor}</p>
 
-              <button type="button" className="client__open">
+              <button type="button" className="client__open" onClick={() => navigate(`/client-reports/${c.id}`)}>
                 Open report <ArrowRight size={14} />
               </button>
             </article>
