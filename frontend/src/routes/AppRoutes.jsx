@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
 import LoginPage from '../pages/Login/LoginPage.jsx';
 import ClientReportsPage from '../pages/ClientReports/ClientReportsPage.jsx';
+import CalculatorPage from '../pages/Calculator/CalculatorPage.jsx';
 import ClientPlanPage from '../pages/ClientReports/ClientPlan/ClientPlanPage.jsx';
 import ComingSoonPage from '../pages/Placeholder/ComingSoonPage.jsx';
 import AppLayout from '../components/layout/AppLayout.jsx';
@@ -18,6 +19,7 @@ export default function AppRoutes() {
         }
       >
         <Route path="/client-reports" element={<ClientReportsPage />} />
+        <Route path="/calculators" element={<CalculatorPage />} />
         <Route path="/client-reports/:id" element={<ClientPlanPage />} />
         <Route path="/calculators" element={<ComingSoonPage title="Calculators" />} />
         <Route path="/mutual-fund" element={<ComingSoonPage title="Mutual Fund" />} />
