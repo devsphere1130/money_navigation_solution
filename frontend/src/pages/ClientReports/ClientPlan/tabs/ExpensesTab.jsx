@@ -1,7 +1,7 @@
 import { useState } from 'react';
-import { ChevronDown, ChevronRight, CreditCard, House, ShieldCheck, ShoppingBag, Users } from 'lucide-react';
+import { CreditCard, House, ShieldCheck, ShoppingBag, Users } from 'lucide-react';
 import { inr, pct } from '../format.js';
-import { AmountInput, ShareCell, TabFooter } from '../PlanParts.jsx';
+import { AmountInput, CategoryRow, ShareCell, TabFooter } from '../PlanParts.jsx';
 
 const CATEGORIES = [
   {
@@ -51,7 +51,7 @@ const CATEGORIES = [
 const itemKey = (cat, i) => `${cat.key}-${i}`;
 const sum = (cat, expenses) => cat.items.reduce((s, _, i) => s + (Number(expenses[itemKey(cat, i)]) || 0), 0);
 
-export const expensesTotal = (expenses) => CATEGORIES.reduce((s, c) => s + sum(c, expenses), 0);
+export const expensesTotal = (expenses) => CATEGORIES.reduce((s, c)  => s + sum(c, expenses), 0);
 
 export default function ExpensesTab({
   expenses, onExpensesChange, incomeTotal, onBack, onNext, prevLabel, nextLabel,
@@ -77,24 +77,20 @@ export default function ExpensesTab({
           const isOpen = Boolean(open[cat.key]);
           const catTotal = sum(cat, expenses);
           const filled = cat.items.filter((_, i) => Number(expenses[itemKey(cat, i)]) > 0).length;
-          const Icon = cat.icon;
           return (
             <div key={cat.key}>
-              <button
-                type="button"
-                className="plan-row exp__cat"
-                aria-expanded={isOpen}
-                onClick={() => setOpen({ ...open, [cat.key]: !isOpen })}
-              >
-                <span className="plan-source">
-                  <span className="exp__chevron">{isOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}</span>
-                  <span className={`plan-icon tone-bg--${cat.tone}`}><Icon size={16} /></span>
-                  <span><strong>{cat.label}</strong><small>{filled} of {cat.items.length} items filled</small></span>
-                </span>
-                <strong className="exp__num">{inr(catTotal)}</strong>
-                <span className="plan-annual">{inr(catTotal * 12)}</span>
-                <ShareCell percent={ofIncome(catTotal)} tone={cat.tone} strong />
-              </button>
+              <CategoryRow
+                icon={cat.icon}
+                label={cat.label}
+                tone={cat.tone}
+                isOpen={isOpen}
+                onToggle={() => setOpen({ ...open, [cat.key]: !isOpen })}
+                filled={filled}
+                count={cat.items.length}
+                total={catTotal}
+                extra={<span className="plan-annual">{inr(catTotal * 12)}</span>}
+                percent={ofIncome(catTotal)}
+              />
 
               {isOpen && cat.items.map((label, i) => {
                 const key = itemKey(cat, i);

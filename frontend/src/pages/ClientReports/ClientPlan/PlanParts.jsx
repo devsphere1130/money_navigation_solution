@@ -1,5 +1,5 @@
-import { ArrowLeft, ArrowRight } from 'lucide-react';
-import { pct } from './format.js';
+import { ArrowLeft, ArrowRight, ChevronDown, ChevronRight } from 'lucide-react';
+import { inr, pct } from './format.js';
 
 // Small pieces shared by every table-style tab (Income, Expenses, Savings, ...).
 
@@ -42,5 +42,24 @@ export function TabFooter({ onBack, onNext, prevLabel, nextLabel }) {
         Next: {nextLabel} <ArrowRight size={14} />
       </button>
     </footer>
+  );
+}
+
+// Expandable group header row (Expenses categories, Asset classes, ...).
+// `extra` fills the third column (annual value, or an empty cell).
+export function CategoryRow({
+  icon: Icon, label, tone, isOpen, onToggle, filled, count, total, extra, percent, className = '',
+}) {
+  return (
+    <button type="button" className={`plan-row exp__cat ${className}`} aria-expanded={isOpen} onClick={onToggle}>
+      <span className="plan-source">
+        <span className="exp__chevron">{isOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}</span>
+        <span className={`plan-icon tone-bg--${tone}`}><Icon size={16} /></span>
+        <span><strong>{label}</strong><small>{filled} of {count} items filled</small></span>
+      </span>
+      <strong className="exp__num">{inr(total)}</strong>
+      {extra}
+      <ShareCell percent={percent} tone={tone} strong />
+    </button>
   );
 }

@@ -7,6 +7,7 @@ import { inr, pct } from './format.js';
 import { incomeTotal } from './tabs/IncomeTab.jsx';
 import { expensesTotal } from './tabs/ExpensesTab.jsx';
 import { liabilitiesTotal } from './tabs/LiabilitiesTab.jsx';
+import { assetsTotal, investibleAssetsTotal, personalAssetsTotal } from './tabs/AssetsTab.jsx';
 import './ClientPlan.css';
 
 const today = () => new Date().toISOString().slice(0, 10);
@@ -26,6 +27,9 @@ export default function ClientPlanPage() {
   const [expenses, setExpenses] = useState({});
   const [savings, setSavings] = useState({});
   const [liabilityData, setLiabilityData] = useState({});
+  const [assetData, setAssetData] = useState({});
+  const [goals, setGoals] = useState([]);
+  const [insurance, setInsurance] = useState({ years: '40', lifeCover: '', healthCover: '', auto: false });
 
   useEffect(() => {
     listClients()
@@ -56,9 +60,8 @@ export default function ClientPlanPage() {
   const incomeAmount = incomeTotal(income);
   const expensesAmount = expensesTotal(expenses);
   const savingsAmount = incomeAmount - expensesAmount;
-  // Assets and liabilities come from tabs that are not built yet.
-  const assets = 0;
-  const personalAssets = 0;
+  const assets = assetsTotal(assetData);
+  const personalAssets = personalAssetsTotal(assetData);
   const liabilities = liabilitiesTotal(liabilityData);
   const netWorth = assets - liabilities;
 
@@ -79,7 +82,7 @@ export default function ClientPlanPage() {
     },
     { label: 'TOTAL ASSETS', color: '#c29035', value: assets, note: `Liabilities ${inr(liabilities)}` },
     {
-      label: 'NET WORTH', color: '#c29035', value: netWorth, dark: true,
+      label: 'NET WORTH', color: '#997023', value: netWorth, dark: true,
       note: `≈ ₹${(netWorth / 10000000).toFixed(2)} Cr · ${pct(ratio(netWorth, assets))} of assets`,
     },
   ];
@@ -131,6 +134,16 @@ export default function ClientPlanPage() {
           onIncomeChange={setIncome}
           expenses={expenses}
           onExpensesChange={setExpenses}
+          goals={goals}
+          onGoalsChange={setGoals}
+          surplusAmount={savingsAmount}
+          insurance={insurance}
+          onInsuranceChange={setInsurance}
+          liabilitiesAmount={liabilities}
+          investibleAmount={investibleAssetsTotal(assetData)}
+          members={1} /* family size: client only, until the Family Members tab exists */
+          assetData={assetData}
+          onAssetsChange={setAssetData}
           liabilities={liabilityData}
           onLiabilitiesChange={setLiabilityData}
           assetsTotal={assets}
