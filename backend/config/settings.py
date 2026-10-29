@@ -24,6 +24,7 @@ INSTALLED_APPS = [
     'accounts',
     'api',
     'client_reports',
+    'calculators',
 ]
 
 MIDDLEWARE = [
