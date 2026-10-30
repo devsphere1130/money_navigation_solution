@@ -17,6 +17,9 @@ const titleCase = (v) => v.toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase()
 const initials = (name) => name.split(' ').slice(0, 2).map((w) => w[0]).join('').toUpperCase();
 
 const DEFAULT_INSURANCE = { years: '40', lifeCover: '', healthCover: '', auto: false };
+const DEFAULT_RETIREMENT = {
+  expense: '', corpus: '', age: '35', retireAge: '60', life: '85', inflation: '6', before: '12', after: '8',
+};
 
 const ratio =(n, of) => (of > 0 ? Math.max(0, (n / of) * 100) : 0);
 
@@ -34,9 +37,7 @@ export default function ClientPlanPage() {
   const [assetData, setAssetData] = useState({});
   const [goals, setGoals] = useState([]);
   const [family, setFamily] = useState([]);
-  const [retirement, setRetirement] = useState({
-    expense: '', corpus: '', age: '35', retireAge: '60', life: '85', inflation: '6', before: '12', after: '8',
-  });
+  const [retirement, setRetirement] = useState(DEFAULT_RETIREMENT);
   const [insurance, setInsurance] = useState(DEFAULT_INSURANCE);
   const [saved, setSaved] = useState('');
   const [saving, setSaving] = useState(false);
@@ -58,6 +59,7 @@ export default function ClientPlanPage() {
             advisorNotes: '',
           },
           insurance: DEFAULT_INSURANCE,
+          retirement: DEFAULT_RETIREMENT,
         };
         const plan = fromPlan(await getPlan(id), defaults);
         setInfo(plan.info);
@@ -68,6 +70,8 @@ export default function ClientPlanPage() {
         setLiabilityData(plan.liabilityData);
         setInsurance(plan.insurance);
         setFamily(plan.family);
+        setGoals(plan.goals);
+        setRetirement(plan.retirement);
         setSaved(JSON.stringify(plan));
         setClient(c);
       })
@@ -89,8 +93,8 @@ export default function ClientPlanPage() {
   const liabilities = liabilitiesTotal(liabilityData);
   const netWorth = assets - liabilities;
 
-  // Everything the Save button writes to the database (Goals and Retirement are not stored yet).
-  const planState = { info, income, expenses, savings, assetData, liabilityData, insurance, family };
+  // Everything the Save button writes to the database.
+  const planState = { info, income, expenses, savings, assetData, liabilityData, insurance, family, goals, retirement };
   const snapshot = JSON.stringify(planState);
   const dirty = snapshot !== saved;
 

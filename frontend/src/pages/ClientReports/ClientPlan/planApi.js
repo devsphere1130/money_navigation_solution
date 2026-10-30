@@ -10,7 +10,31 @@ const text = (v) => (v == null ? '' : String(v));
 // API decimal ("50000.00") -> the digit string the inputs hold; zero becomes an empty box.
 const digits = (v) => (Number(v) ? String(Math.round(Number(v))) : '');
 
-export const toPayload = ({ info, income, expenses, savings, assetData, liabilityData, insurance, family }) => ({
+const rate = (v) => String(Number(v));
+
+export const toPayload = ({
+  info, income, expenses, savings, assetData, liabilityData, insurance, family, goals, retirement: r,
+}) => ({
+  goals: goals.map((g) => ({
+    name: g.name,
+    cost_today: amount(g.cost),
+    years_to_goal: amount(g.years),
+    inflation_rate: amount(g.inflation),
+    expected_return: amount(g.ret),
+    current_savings: amount(g.savings),
+    monthly_sip: amount(g.sip),
+    priority: g.priority,
+  })),
+  retirement: {
+    monthly_expense: amount(r.expense),
+    existing_corpus: amount(r.corpus),
+    current_age: amount(r.age),
+    retirement_age: amount(r.retireAge),
+    life_expectancy: amount(r.life),
+    inflation_rate: amount(r.inflation),
+    return_before: amount(r.before),
+    return_after: amount(r.after),
+  },
   info: {
     client_name: info.clientName,
     spouse_name: info.spouseName,
@@ -55,16 +79,28 @@ export const toPayload = ({ info, income, expenses, savings, assetData, liabilit
   })),
 });
 
-// `defaults` fills whatever has never been saved (info, insurance).
+// `defaults` fills whatever has never been saved (info, insurance, retirement).
 export function fromPlan(plan, defaults) {
   const amounts = (rows) => Object.fromEntries(rows.map((r) => [r.key, digits(r.amount)]));
   const withPurpose = (rows) => ({
     ...amounts(rows),
     ...Object.fromEntries(rows.filter((r) => r.purpose).map((r) => [`${r.key}Goal`, r.purpose])),
   });
-  const { info, insurance } = plan;
+  const { info, insurance, retirement: r } = plan;
 
   return {
+    goals: plan.goals.map((g, i) => ({
+      id: `${Date.now()}-g${i}`, name: g.name, cost: digits(g.cost_today), years: String(g.years_to_goal),
+      inflation: rate(g.inflation_rate), ret: rate(g.expected_return), savings: digits(g.current_savings),
+      sip: digits(g.monthly_sip), priority: g.priority,
+    })),
+    retirement: r
+      ? {
+          expense: digits(r.monthly_expense), corpus: digits(r.existing_corpus), age: String(r.current_age),
+          retireAge: String(r.retirement_age), life: String(r.life_expectancy), inflation: rate(r.inflation_rate),
+          before: rate(r.return_before), after: rate(r.return_after),
+        }
+      : defaults.retirement,
     info: info
       ? {
           clientName: info.client_name, spouseName: info.spouse_name, phone: info.phone, email: info.email,

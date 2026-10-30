@@ -16,6 +16,10 @@ def plan(**over):
         'insurance': {'income_replacement_years': 40, 'existing_life_cover': '1000000', 'existing_health_cover': '0',
                       'auto_sum_from_family': False},
         'family': [{'name': 'Asha', 'relationship': 'Spouse', 'date_of_birth': None, 'age': 33, 'is_dependent': True}],
+        'goals': [{'name': 'Car', 'cost_today': 1000000, 'years_to_goal': 5, 'inflation_rate': 6, 'expected_return': 10,
+                   'current_savings': 0, 'monthly_sip': 5000, 'priority': 'High'}],
+        'retirement': {'monthly_expense': 40000, 'existing_corpus': 900, 'current_age': 35, 'retirement_age': 60,
+                       'life_expectancy': 85, 'inflation_rate': 6, 'return_before': 12, 'return_after': 8},
     }
     data.update(over)
     return data
@@ -41,7 +45,10 @@ class ClientPlanTests(APITestCase):
         self.client_row.refresh_from_db()
         self.assertEqual((self.client_row.net_worth, self.client_row.monthly_surplus, self.client_row.family_members), (500000, 70000, 1))
         self.assertEqual((self.client_row.mobile, self.client_row.email), ('9876543210', 'a@x.com'))
-        self.assertEqual(self.client.get(self.url).json()['assets'][0]['purpose'], 'Emergency')
+        body = self.client.get(self.url).json()
+        self.assertEqual(body['assets'][0]['purpose'], 'Emergency')
+        self.assertEqual((body['goals'][0]['name'], body['goals'][0]['priority']), ('Car', 'High'))
+        self.assertEqual(body['retirement']['retirement_age'], 60)
 
     def test_update_replaces_rows(self):
         self.client.put(self.url, plan(), format='json')

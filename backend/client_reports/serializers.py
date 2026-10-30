@@ -5,8 +5,8 @@ from django.db import transaction
 from rest_framework import serializers
 
 from .models import (
-    AssetItem, Client, ClientProfile, ExpenseItem, FamilyMember, IncomeItem, InsuranceCover,
-    InvestmentItem, LiabilityItem,
+    AssetItem, Client, ClientProfile, ExpenseItem, FamilyMember, Goal, IncomeItem, InsuranceCover,
+    InvestmentItem, LiabilityItem, RetirementPlan,
 )
 
 
@@ -85,6 +85,18 @@ class MemberSerializer(serializers.ModelSerializer):
         exclude = ['id', 'client', 'position']
 
 
+class GoalSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Goal
+        exclude = ['id', 'client', 'position']
+
+
+class RetirementSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RetirementPlan
+        exclude = ['id', 'client']
+
+
 class PlanSerializer(serializers.Serializer):
     info = InfoSerializer()
     income = ROWS['income'][1](many=True)
@@ -94,16 +106,21 @@ class PlanSerializer(serializers.Serializer):
     liabilities = ROWS['liabilities'][1](many=True)
     insurance = InsuranceSerializer()
     family = MemberSerializer(many=True)
+    goals = GoalSerializer(many=True)
+    retirement = RetirementSerializer()
 
 
 def plan_data(client):
-    """The saved plan in the shape PUT accepts. `info` and `insurance` are null until first saved."""
+    """The saved plan in the shape PUT accepts. `info`, `insurance` and `retirement` are null until first saved."""
     profile = ClientProfile.objects.filter(client=client).first()
     cover = InsuranceCover.objects.filter(client=client).first()
+    retirement = RetirementPlan.objects.filter(client=client).first()
     data = {
         'info': InfoSerializer(profile).data if profile else None,
         'insurance': InsuranceSerializer(cover).data if cover else None,
+        'retirement': RetirementSerializer(retirement).data if retirement else None,
         'family': MemberSerializer(client.members.all(), many=True).data,
+        'goals': GoalSerializer(client.goals.all(), many=True).data,
     }
     for name, (model, row) in ROWS.items():
         data[name] = row(model.objects.filter(client=client), many=True).data
@@ -115,6 +132,9 @@ def save_plan(client, data):
     """Replace every plan table of this client with the submitted rows, then refresh the list-page figures."""
     ClientProfile.objects.update_or_create(client=client, defaults=data['info'])
     InsuranceCover.objects.update_or_create(client=client, defaults=data['insurance'])
+    RetirementPlan.objects.update_or_create(client=client, defaults=data['retirement'])
+    client.goals.all().delete()
+    Goal.objects.bulk_create(Goal(client=client, position=i, **g) for i, g in enumerate(data['goals']))
     for name, (model, _) in ROWS.items():
         model.objects.filter(client=client).delete()
         model.objects.bulk_create(model(client=client, **row) for row in data[name])

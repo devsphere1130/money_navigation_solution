@@ -140,3 +140,41 @@ class FamilyMember(models.Model):
 
     def __str__(self):
         return f'{self.name or "Member"} ({self.relationship})'
+
+
+class Goal(models.Model):
+    """Goals tab: one row per life goal. Future target, corpus and shortfall are calculated, not stored."""
+
+    client = models.ForeignKey(Client, on_delete=models.CASCADE, related_name='goals')
+    position = models.PositiveSmallIntegerField(default=0)
+    name = models.CharField(max_length=60)
+    cost_today = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    years_to_goal = models.PositiveSmallIntegerField(default=0)
+    inflation_rate = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    expected_return = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    current_savings = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    monthly_sip = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    priority = models.CharField(max_length=10, default='Medium')
+
+    class Meta:
+        ordering = ['position', 'id']
+
+    def __str__(self):
+        return self.name
+
+
+class RetirementPlan(models.Model):
+    """Retirement tab inputs (one row per client). Corpus required and the SIP are calculated, not stored."""
+
+    client = models.OneToOneField(Client, on_delete=models.CASCADE, related_name='retirement')
+    monthly_expense = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    existing_corpus = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    current_age = models.PositiveSmallIntegerField(default=35)
+    retirement_age = models.PositiveSmallIntegerField(default=60)
+    life_expectancy = models.PositiveSmallIntegerField(default=85)
+    inflation_rate = models.DecimalField(max_digits=5, decimal_places=2, default=6)
+    return_before = models.DecimalField(max_digits=5, decimal_places=2, default=12)
+    return_after = models.DecimalField(max_digits=5, decimal_places=2, default=8)
+
+    def __str__(self):
+        return f'Retirement plan of {self.client}'
