@@ -632,6 +632,14 @@
   color: var(--color-error);
 }
 
+.amount--surplus {
+  color: #1f8a5b;
+}
+
+.goal__inputs .plan-input {
+  gap: 22px;
+}
+
 /* Match the reference: labels are medium weight, only the figures are bold */
 .plan-source strong,
 .exp__cat .plan-source>span:last-child strong {

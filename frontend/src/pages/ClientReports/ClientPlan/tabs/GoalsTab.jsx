@@ -1,4 +1,4 @@
-import { Flag, Pencil, Plus, Target, Trash2 } from 'lucide-react';
+import { Flag, Heart, Pencil, Plus, Trash2 } from 'lucide-react';
 import { inr, pct, sipFactor } from '../format.js';
 import { NumberBox, PlanChart, TabFooter } from '../PlanParts.jsx';
 
@@ -34,7 +34,7 @@ function GoalCard({ goal, c, first, onChange, onDelete }) {
   return (
     <article className={`plan-item${first ? ' plan-item--first' : ''}`}>
       <header className="plan-item__head">
-        <span className="plan-icon tone-bg--blue"><Target size={18} /></span>
+        <span className="plan-icon tone-bg--blue"><Heart size={18} /></span>
         <input
           className="plan-item__name" type="text" maxLength={60} aria-label="Goal name"
           value={goal.name} onChange={(e) => set('name')(e.target.value)}
@@ -43,7 +43,7 @@ function GoalCard({ goal, c, first, onChange, onDelete }) {
         <select className="goal__priority" aria-label="Priority" value={goal.priority} onChange={(e) => set('priority')(e.target.value)}>
           {PRIORITIES.map((p) => <option key={p}>{p}</option>)}
         </select>
-        <span className={`ins__badge ${done ? 'ins__badge--ok' : 'ins__badge--bad'}`}>{done ? 'On track' : 'Behind'}</span>
+        <span className={`ins__badge ${done ? 'ins__badge--ok' : 'ins__badge--bad'}`}>{done ? 'Funded' : 'Behind'}</span>
         <button type="button" className="plan-item__delete" onClick={onDelete} aria-label={`Delete ${goal.name}`}><Trash2 size={16} /></button>
       </header>
 
@@ -58,12 +58,15 @@ function GoalCard({ goal, c, first, onChange, onDelete }) {
         </div>
 
         <div className="goal__result">
-          <div className="goal__funded"><span>Funded</span><strong>{pct(c.funded)}</strong></div>
+          <div className="goal__funded"><span>Funded</span><strong>{Math.round(c.funded)}%</strong></div>
           <div className="ins__bar"><b className="ins__fill--ok" style={{ width: `${c.funded}%` }} /></div>
           <dl className="goal__rows">
             <div><dt>Future target</dt><dd>{inr(c.target)}</dd></div>
             <div><dt>Projected corpus</dt><dd>{inr(c.corpus)}</dd></div>
-            <div className="goal__shortfall"><dt>Shortfall</dt><dd className={done ? '' : 'amount--deficit'}>{inr(c.shortfall)}</dd></div>
+            <div className="goal__shortfall">
+              <dt>{done ? 'Surplus' : 'Shortfall'}</dt>
+              <dd className={done ? 'amount--surplus' : 'amount--deficit'}>{inr(done ? c.corpus - c.target : c.shortfall)}</dd>
+            </div>
           </dl>
           <div className="goal__sip">
             <div><span>SIP TO FULLY FUND</span><strong>{inr(c.needSip)}/mo</strong></div>
@@ -79,7 +82,7 @@ function GoalCard({ goal, c, first, onChange, onDelete }) {
             <span className="plan-key--target">Target</span>
             <span>Years</span>
           </div>
-          <PlanChart years={c.years} lines={[{ at: c.targetAt, cls: 'target' }, { at: c.corpusAt, cls: 'corpus' }]} />
+          <PlanChart years={c.years} area lines={[{ at: c.targetAt, cls: 'target' }, { at: c.corpusAt, cls: 'corpus' }]} />
         </div>
       </div>
     </article>

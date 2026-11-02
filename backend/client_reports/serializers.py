@@ -147,6 +147,6 @@ def save_plan(client, data):
     client.mobile = data['info']['phone']
     client.email = data['info']['email'].strip().lower()
     client.net_worth = total('assets') - total('liabilities')
-    client.monthly_surplus = total('income') - total('expenses')
+    client.monthly_surplus = total('income') - total('expenses') - total('investments')
     client.family_members = len(data['family'])
     client.save(update_fields=['mobile', 'email', 'net_worth', 'monthly_surplus', 'family_members', 'updated_at'])

@@ -43,7 +43,7 @@ class ClientPlanTests(APITestCase):
         self.assertEqual(IncomeItem.objects.get(client=self.client_row).amount, 100000)
         self.assertEqual(FamilyMember.objects.filter(client=self.client_row).count(), 1)
         self.client_row.refresh_from_db()
-        self.assertEqual((self.client_row.net_worth, self.client_row.monthly_surplus, self.client_row.family_members), (500000, 70000, 1))
+        self.assertEqual((self.client_row.net_worth, self.client_row.monthly_surplus, self.client_row.family_members), (500000, 65000, 1))
         self.assertEqual((self.client_row.mobile, self.client_row.email), ('9876543210', 'a@x.com'))
         body = self.client.get(self.url).json()
         self.assertEqual(body['assets'][0]['purpose'], 'Emergency')

@@ -8,6 +8,7 @@ import { inr, pct } from './format.js';
 import { incomeTotal } from './tabs/IncomeTab.jsx';
 import { expensesTotal } from './tabs/ExpensesTab.jsx';
 import { familyCover } from './tabs/FamilyTab.jsx';
+import { savingsTotal } from './tabs/SavingsTab.jsx';
 import { liabilitiesTotal } from './tabs/LiabilitiesTab.jsx';
 import { assetsTotal, investibleAssetsTotal, personalAssetsTotal } from './tabs/AssetsTab.jsx';
 import './ClientPlan.css';
@@ -87,7 +88,7 @@ export default function ClientPlanPage() {
   const name = `${client.title}. ${titleCase(client.full_name)}`;
   const incomeAmount = incomeTotal(income);
   const expensesAmount = expensesTotal(expenses);
-  const savingsAmount = incomeAmount - expensesAmount;
+  const savingsAmount = incomeAmount - expensesAmount - savingsTotal(savings);
   const assets = assetsTotal(assetData);
   const personalAssets = personalAssetsTotal(assetData);
   const liabilities = liabilitiesTotal(liabilityData);
