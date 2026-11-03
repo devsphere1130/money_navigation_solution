@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, ChevronDown, Download, FileSpreadsheet, FileText, Save } from 'lucide-react';
+import { ArrowLeft, ChevronDown, Download, FileSpreadsheet, FileText, Save, Upload } from 'lucide-react';
 import { exportExcel, exportPdf } from './exportPlan.js';
+import { readPlanFile } from './importPlan.js';
 import { getPlan, listClients, savePlan } from '../../../services/clientService.js';
 import { fromPlan, toPayload } from './planApi.js';
 import { TABS } from './tabs.js';
@@ -47,6 +48,9 @@ export default function ClientPlanPage() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [exporting, setExporting] = useState(false);
   const menuRef = useRef(null);
+  const fileRef = useRef(null);
+  const [pending, setPending] = useState(null);
+  const [notice, setNotice] = useState('');
 
   useEffect(() => {
     const close = (e) => { if (menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false); };
@@ -136,6 +140,46 @@ export default function ClientPlanPage() {
     }
   };
 
+  // Import: read the chosen .xlsx, ask before replacing, then fill the tabs found in the file. Nothing is saved until Save.
+  const chooseFile = async (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    setSaveError('');
+    setNotice('');
+    if (!/\.xlsx$/i.test(file.name)) {
+      setSaveError('Only Excel (.xlsx) files can be imported.');
+      return;
+    }
+    setExporting(true);
+    try {
+      setPending({ ...(await readPlanFile(file, { insurance: DEFAULT_INSURANCE, retirement: DEFAULT_RETIREMENT })), fileName: file.name });
+    } catch (err) {
+      setSaveError(err.message);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const applyImport = () => {
+    const { data, tabs, fields, unmatched } = pending;
+    if (data.info) setInfo({ ...info, ...data.info });
+    if (data.income) setIncome(data.income);
+    if (data.expenses) setExpenses(data.expenses);
+    if (data.savings) setSavings(data.savings);
+    if (data.assetData) setAssetData(data.assetData);
+    if (data.liabilityData) setLiabilityData(data.liabilityData);
+    if (data.insurance) setInsurance(data.insurance);
+    if (data.goals) setGoals(data.goals);
+    if (data.retirement) setRetirement(data.retirement);
+    if (data.family) setFamily(data.family);
+    setNotice(
+      `Imported ${tabs.length} tab${tabs.length === 1 ? '' : 's'}, ${fields} field${fields === 1 ? '' : 's'}`
+      + `${unmatched ? ` (${unmatched} row${unmatched === 1 ? '' : 's'} not recognised)` : ''}. Click Save to keep the changes.`,
+    );
+    setPending(null);
+  };
+
   const cards = [
     {
       label: 'INCOME / MO', color: '#2b3f86', value: incomeAmount,
@@ -174,6 +218,14 @@ export default function ClientPlanPage() {
         </div>
         <div className="plan__actions">
           {saveError && <p className="plan__error" role="alert">{saveError}</p>}
+          {notice && !saveError && <p className="plan__notice" role="status">{notice}</p>}
+          <input
+            ref={fileRef} type="file" hidden aria-label="Import Excel file"
+            accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={chooseFile}
+          />
+          <button type="button" className="plan__export-btn" disabled={exporting} onClick={() => fileRef.current.click()}>
+            <Upload size={15} /> Import
+          </button>
           <div className="plan__export" ref={menuRef}>
             <button
               type="button" className="plan__export-btn" aria-haspopup="menu" aria-expanded={menuOpen}
@@ -197,6 +249,28 @@ export default function ClientPlanPage() {
           </button>
         </div>
       </header>
+
+      {pending && (
+        <div className="plan-modal" role="dialog" aria-modal="true" aria-labelledby="import-title">
+          <div className="plan-modal__box">
+            <h2 id="import-title">Import from Excel?</h2>
+            <p className="plan-modal__file">{pending.fileName}</p>
+            <p>
+              This fills <b>{pending.tabs.length} tab{pending.tabs.length === 1 ? '' : 's'}</b> ({pending.tabs.join(', ')}) and
+              replaces what is there now. Nothing is saved until you click Save.
+            </p>
+            {pending.sourceName && pending.sourceName.trim().toLowerCase() !== (info.clientName || '').trim().toLowerCase() && (
+              <p className="plan-modal__warn">
+                This file was exported for <b>{pending.sourceName}</b>, but you are editing <b>{info.clientName || name}</b>.
+              </p>
+            )}
+            <div className="plan-modal__actions">
+              <button type="button" className="plan__export-btn" onClick={() => setPending(null)}>Cancel</button>
+              <button type="button" className="plan__save" onClick={applyImport}>Import</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <section className="plan__summary">
         {cards.map((c) => (

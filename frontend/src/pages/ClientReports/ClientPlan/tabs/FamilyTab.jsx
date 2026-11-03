@@ -1,8 +1,8 @@
 import { Trash2, UserPlus, Users } from 'lucide-react';
 import { NumberBox, TabFooter } from '../PlanParts.jsx';
 
-const RELATIONS = ['Spouse', 'Son', 'Daughter', 'Father', 'Mother', 'Other'];
-const GENDERS = ['Male', 'Female', 'Other'];
+export const RELATIONS = ['Spouse', 'Son', 'Daughter', 'Father', 'Mother', 'Other'];
+export const GENDERS = ['Male', 'Female', 'Other'];
 
 const newMember = (relation) => ({
   id: Date.now() + Math.random(), name: '', relation, dob: '', age: '', gender: '', occupation: '', income: '',
