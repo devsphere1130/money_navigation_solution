@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
+from time import perf_counter
 from typing import Any
 
 from .analytics import correlation, metrics
+from .holdings import analyze_holdings_overlap
 from .providers import (
     ProviderError,
     fetch_amfi_aum,
@@ -63,17 +66,20 @@ def _today_window() -> tuple[date, date]:
     return end - timedelta(days=365 * 5 + 7), end
 
 
-def fetch_fund_data(scheme_code: str, *, risk_free_rate: float = 0.065, include_history: bool = True, latest_records: list[dict[str, Any]] | None = None, ter_snapshot: dict[str, tuple[float | None, str | None]] | None = None) -> dict[str, Any]:
+def fetch_fund_data(scheme_code: str, *, risk_free_rate: float = 0.065, include_history: bool = True, include_metadata: bool = True, latest_records: list[dict[str, Any]] | None = None, ter_snapshot: dict[str, tuple[float | None, str | None]] | None = None, aum_data: tuple[float | None, str | None] | None = None) -> dict[str, Any]:
     """Fetch a fund live, preferring AMFI and using MFAPI only on AMFI failure."""
     try:
-        latest_records = latest_records or fetch_amfi_latest()
+        latest_records = latest_records if latest_records is not None else fetch_amfi_latest()
         latest = _pick_latest(latest_records, scheme_code)
         history = []
         if include_history:
             start, end = _today_window()
             history = fetch_amfi_history(scheme_code, start, end)
-        ter, ter_as_of = fetch_amfi_ter(scheme_code, latest_records, ter_snapshot)
-        aum, aum_as_of = fetch_amfi_aum(latest.get('scheme_name') or '')
+        ter, ter_as_of = (None, None)
+        aum, aum_as_of = (None, None)
+        if include_metadata:
+            ter, ter_as_of = fetch_amfi_ter(scheme_code, latest_records, ter_snapshot)
+            aum, aum_as_of = aum_data if aum_data is not None else fetch_amfi_aum(latest.get('scheme_name') or '')
         result = _base_detail(latest, source='AMFI', as_of=latest.get('date'))
         result.update({'ter': ter, 'ter_as_of': ter_as_of, 'aum': aum, 'aum_unit': 'lakhs' if aum is not None else None, 'aum_as_of': aum_as_of, 'history': history})
         result['metrics'] = metrics(history, risk_free_rate) if history else None
@@ -103,13 +109,24 @@ def search_funds(query: str, limit: int = 25) -> dict[str, Any]:
 
 
 def compare_funds(scheme_codes: list[str], risk_free_rate: float = 0.065) -> dict[str, Any]:
+    started = perf_counter()
     try:
         latest_records = fetch_amfi_latest()
     except ProviderError as exc:
         logger.warning('AMFI latest snapshot unavailable for comparison: %s', exc)
-        latest_records = None
-    ter_snapshot = fetch_amfi_ter_snapshot() if latest_records is not None else None
-    funds = [fetch_fund_data(code, risk_free_rate=risk_free_rate, latest_records=latest_records, ter_snapshot=ter_snapshot) for code in scheme_codes]
+        # An empty snapshot skips another latest-NAV retry per selected fund and
+        # lets each fund go directly to the MFAPI fallback.
+        latest_records = []
+
+    # History and analytics are the critical path for Compare. Load optional
+    # TER/AUM metadata only when the client opens Fundamentals.
+    worker_count = min(4, len(scheme_codes))
+    with ThreadPoolExecutor(max_workers=max(1, worker_count)) as pool:
+        funds = list(pool.map(
+            lambda code: fetch_fund_data(code, risk_free_rate=risk_free_rate, include_metadata=False, latest_records=latest_records),
+            scheme_codes,
+        ))
+    logger.info('Fund Analyzer comparison loaded %d funds in %.2fs', len(funds), perf_counter() - started)
     matrix = {fund['scheme_code']: {} for fund in funds}
     for left in funds:
         for right in funds:
@@ -129,3 +146,50 @@ def compare_funds(scheme_codes: list[str], risk_free_rate: float = 0.065) -> dic
         'bestSharpe': best_sharpe['scheme_code'] if best_sharpe else None,
         'lowestVolatility': lowest_vol['scheme_code'] if lowest_vol else None,
     }}
+
+
+def fetch_fundamentals(scheme_codes: list[str]) -> dict[str, Any]:
+    """Load slow, optional TER and AUM data for the Fundamentals tab."""
+    latest_records = fetch_amfi_latest()
+
+    def load_aum_values() -> dict[str, tuple[float | None, str | None]]:
+        result = {}
+        for code in scheme_codes:
+            try:
+                record = _pick_latest(latest_records, code)
+                result[code] = fetch_amfi_aum(record.get('scheme_name') or '')
+            except ProviderError:
+                result[code] = (None, None)
+        return result
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        ter_future = pool.submit(fetch_amfi_ter_snapshot, scheme_codes)
+        aum_future = pool.submit(load_aum_values)
+        try:
+            ter_snapshot = ter_future.result()
+        except Exception:
+            logger.exception('Fund Analyzer TER lookup failed')
+            ter_snapshot = {}
+        try:
+            aum_by_code = aum_future.result()
+        except Exception:
+            logger.exception('Fund Analyzer AUM lookup failed')
+            aum_by_code = {}
+
+    funds = []
+    for code in scheme_codes:
+        record = _pick_latest(latest_records, code)
+        aum, aum_as_of = aum_by_code.get(code, (None, None))
+        funds.append({
+            **_base_detail(record, source='AMFI', as_of=record.get('date')),
+            'ter': ter_snapshot.get(str(code), (None, None))[0],
+            'ter_as_of': ter_snapshot.get(str(code), (None, None))[1],
+            'aum': aum,
+            'aum_unit': 'lakhs' if aum is not None else None,
+            'aum_as_of': aum_as_of,
+        })
+    return {'source': 'AMFI', 'funds': funds}
+
+
+def compare_holdings_overlap(scheme_codes: list[str]) -> dict[str, Any]:
+    return analyze_holdings_overlap(scheme_codes)

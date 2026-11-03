@@ -10,6 +10,16 @@ export async function compareFunds(schemeCodes) {
   return data;
 }
 
+export async function getFundamentals(schemeCodes) {
+  const { data } = await axiosClient.post('/fundamentals', { scheme_codes: schemeCodes });
+  return data;
+}
+
+export async function getHoldingsOverlap(schemeCodes) {
+  const { data } = await axiosClient.post('/overlap', { scheme_codes: schemeCodes });
+  return data;
+}
+
 export async function getFund(schemeCode) {
   const { data } = await axiosClient.get(`/funds/${encodeURIComponent(schemeCode)}`);
   return data;

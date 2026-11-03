@@ -7,7 +7,7 @@ from rest_framework.views import APIView
 
 from .providers import ProviderError
 from .serializers import CompareRequestSerializer, CompareResponseSerializer, FundDetailSerializer, FundSearchResponseSerializer, FundSearchResultSerializer
-from .services import compare_funds, fetch_fund_data, search_funds
+from .services import compare_funds, compare_holdings_overlap, fetch_fund_data, fetch_fundamentals, search_funds
 
 
 class FundSearchView(APIView):
@@ -53,3 +53,33 @@ class FundCompareView(APIView):
             return Response(CompareResponseSerializer(payload).data)
         except ProviderError as exc:
             return Response({'detail': str(exc), 'source': 'MFAPI (backup)', 'asOfDate': None}, status=503)
+
+
+class FundFundamentalsView(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        request_serializer = CompareRequestSerializer(data=request.data)
+        if not request_serializer.is_valid():
+            return Response({'detail': request_serializer.errors, 'source': 'AMFI'}, status=400)
+        try:
+            payload = fetch_fundamentals(request_serializer.validated_data['scheme_codes'])
+            payload['funds'] = [FundDetailSerializer(fund).data for fund in payload['funds']]
+            return Response(payload)
+        except ProviderError as exc:
+            return Response({'detail': str(exc), 'source': 'AMFI'}, status=503)
+
+
+class FundOverlapView(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        request_serializer = CompareRequestSerializer(data=request.data)
+        if not request_serializer.is_valid():
+            return Response({'detail': request_serializer.errors, 'available': False}, status=400)
+        try:
+            return Response(compare_holdings_overlap(request_serializer.validated_data['scheme_codes']))
+        except ProviderError as exc:
+            return Response({'detail': str(exc), 'available': False}, status=503)

@@ -10,6 +10,6 @@ function FundCard({ fund }) {
   </article>;
 }
 
-export default function FundamentalsTab({ funds }) {
-  return <><p className="fa-notice"><Info size={14} /> <span>Only official AMFI metadata and NAV-derived metrics are shown.</span></p><div className="fa-funds">{funds.map((fund) => <FundCard key={fund.scheme_code} fund={fund} />)}</div></>;
+export default function FundamentalsTab({ funds, loading, error }) {
+  return <>{loading && <p className="fa-notice" role="status"><Info size={14} /> <span>Loading TER and AUM from AMFI…</span></p>}{error && <p className="fa-notice" role="alert"><Info size={14} /> <span>{error}</span></p>}<p className="fa-notice"><Info size={14} /> <span>Only official AMFI metadata and NAV-derived metrics are shown.</span></p><div className="fa-funds">{funds.map((fund) => <FundCard key={fund.scheme_code} fund={fund} />)}</div></>;
 }

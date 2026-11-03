@@ -24,6 +24,11 @@ python manage.py createsuperuser   # this is your advisor login (email + passwor
 python manage.py runserver
 ```
 
+The Fund Analyzer uses Django's in-process cache for local development. Set
+`REDIS_URL` (for example, `redis://localhost:6379/0`) in a deployed backend to
+share cached AMFI/MFAPI responses across workers. Install the backend
+requirements after updating them so the Redis cache backend is available.
+
 ## Deploying to Vercel
 Create two Vercel projects from this repo: one with root directory `frontend`, one with `backend`.
 Set the env vars from each `.env.example` in Vercel. Use a hosted PostgreSQL (Neon, Supabase, Vercel Postgres) for `DATABASE_URL`.
