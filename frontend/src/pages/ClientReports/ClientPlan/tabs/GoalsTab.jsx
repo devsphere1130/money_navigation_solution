@@ -9,7 +9,7 @@ const NEW_GOAL = { name: 'New goal', cost: '1000000', years: '5', inflation: '6'
 const num = (v) => Number(v) || 0;
 
 // Everything a goal card shows, worked out from its inputs.
-function calc(g) {
+export function goalCalc(g) {
   const years = num(g.years);
   const rate = num(g.ret) / 100;
   const inflation = num(g.inflation) / 100;
@@ -90,7 +90,7 @@ function GoalCard({ goal, c, first, onChange, onDelete }) {
 }
 
 export default function GoalsTab({ goals, onGoalsChange, surplusAmount, onBack, onNext, prevLabel, nextLabel }) {
-  const calcs = goals.map(calc);
+  const calcs = goals.map(goalCalc);
   const target = calcs.reduce((s, c) => s + c.target, 0);
   const corpus = calcs.reduce((s, c) => s + c.corpus, 0);
   const sip = goals.reduce((s, g) => s + num(g.sip), 0);

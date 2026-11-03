@@ -52,11 +52,8 @@ function CoverCard({ icon: Icon, title, iconClass, recommended, existing, rows }
   );
 }
 
-export default function InsuranceTab({
-  insurance, onInsuranceChange, incomeTotal, liabilitiesAmount, investibleAmount, members, familyLife, familyHealth,
-  onBack, onNext, prevLabel, nextLabel,
-}) {
-  const set = (field, value) => onInsuranceChange({ ...insurance, [field]: value });
+// Recommended and existing life / health cover; shared with the report export.
+export function insuranceCalc({ insurance, incomeTotal, liabilitiesAmount, investibleAmount, members, familyLife, familyHealth }) {
   const years = Number(insurance.years) || 0;
   const annualIncome = incomeTotal * 12;
   // With auto-sum on, cover is the total entered on the Family Members tab.
@@ -67,6 +64,21 @@ export default function InsuranceTab({
   const floater = HEALTH_BASE + HEALTH_EXTRA * Math.max(members - 1, 0);
   const floor = annualIncome * HEALTH_FLOOR_RATE;
   const healthRecommended = Math.max(floater, floor);
+  return {
+    years, annualIncome, lifeExisting, healthExisting, lifeRecommended, floater, floor, healthRecommended,
+    lifeStatus: coverStatus(lifeRecommended, lifeExisting).label,
+    healthStatus: coverStatus(healthRecommended, healthExisting).label,
+  };
+}
+
+export default function InsuranceTab({
+  insurance, onInsuranceChange, incomeTotal, liabilitiesAmount, investibleAmount, members, familyLife, familyHealth,
+  onBack, onNext, prevLabel, nextLabel,
+}) {
+  const set = (field, value) => onInsuranceChange({ ...insurance, [field]: value });
+  const {
+    years, annualIncome, lifeExisting, healthExisting, lifeRecommended, floater, floor, healthRecommended,
+  } = insuranceCalc({ insurance, incomeTotal, liabilitiesAmount, investibleAmount, members, familyLife, familyHealth });
 
   return (
     <section className="plan-card plan-card--flush">

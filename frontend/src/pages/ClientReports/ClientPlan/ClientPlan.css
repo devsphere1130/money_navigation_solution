@@ -1777,6 +1777,24 @@
   background: var(--color-blue); color: var(--color-white); font: 600 13px var(--font-main); cursor: pointer;
 }
 .plan__save:disabled { opacity: 0.55; cursor: not-allowed; }
+.plan__export { position: relative; }
+.plan__export-btn {
+  display: inline-flex; align-items: center; gap: 8px; padding: 10px 14px; border: 1px solid var(--color-light-gray);
+  border-radius: var(--radius); background: var(--color-white); color: var(--color-blue); font: 500 13px var(--font-main); cursor: pointer;
+}
+.plan__export-btn:disabled { opacity: 0.6; cursor: wait; }
+.plan__menu {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 20; min-width: 210px; padding: 6px;
+  border: 1px solid var(--color-light-gray); border-radius: 12px; background: var(--color-white); box-shadow: 0 10px 30px rgba(11, 31, 61, 0.14);
+}
+.plan__menu button {
+  display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 12px; border: 0; border-radius: 8px;
+  background: none; color: var(--color-blue); font: 500 13px var(--font-main); text-align: left; cursor: pointer;
+}
+.plan__menu button:hover { background: var(--color-light-gray); }
+.plan__menu small { margin-left: auto; color: var(--color-gray); font-size: 11px; }
+.plan__menu-xls { color: #1f8a5b; }
+.plan__menu-pdf { color: var(--color-error); }
 @media (max-width: 640px) {
   .plan__actions { width: 100%; justify-content: space-between; margin-left: 0; }
   .plan__status { display: block; margin: 4px 0 0; }

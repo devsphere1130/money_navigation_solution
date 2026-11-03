@@ -5,7 +5,7 @@ import { NumberBox, PlanChart, TabFooter } from '../PlanParts.jsx';
 const num = (v) => Number(v) || 0;
 
 // Corpus needed at retirement (expenses grow with inflation, the pot earns `after`), and the SIP to reach it.
-function calc(r) {
+export function retirementCalc(r) {
   const yearsTo = Math.max(0, num(r.retireAge) - num(r.age));
   const yearsIn = Math.max(0, num(r.life) - num(r.retireAge));
   const inflation = num(r.inflation) / 100;
@@ -25,7 +25,7 @@ function calc(r) {
 }
 
 export default function RetirementTab({ retirement: r, onRetirementChange, expensesAmount, onBack, onNext, prevLabel, nextLabel }) {
-  const c = calc(r);
+  const c = retirementCalc(r);
   const set = (field) => (value) => onRetirementChange({ ...r, [field]: value });
 
   const stats = [

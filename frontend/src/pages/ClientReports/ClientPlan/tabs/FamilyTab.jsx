@@ -9,7 +9,7 @@ const newMember = (relation) => ({
   lifePolicy: '', lifeCover: '', healthPolicy: '', healthCover: '', dependent: ['Son', 'Daughter'].includes(relation), notes: '',
 });
 
-const ageOf = (dob) => {
+export const ageOf = (dob) => {
   const d = new Date(dob);
   if (Number.isNaN(d.getTime())) return '';
   const now = new Date();

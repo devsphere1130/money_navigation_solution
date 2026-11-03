@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, Save } from 'lucide-react';
+import { ArrowLeft, ChevronDown, Download, FileSpreadsheet, FileText, Save } from 'lucide-react';
+import { exportExcel, exportPdf } from './exportPlan.js';
 import { getPlan, listClients, savePlan } from '../../../services/clientService.js';
 import { fromPlan, toPayload } from './planApi.js';
 import { TABS } from './tabs.js';
@@ -43,6 +44,15 @@ export default function ClientPlanPage() {
   const [saved, setSaved] = useState('');
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState('');
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const menuRef = useRef(null);
+
+  useEffect(() => {
+    const close = (e) => { if (menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false); };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, []);
 
   useEffect(() => {
     listClients()
@@ -112,6 +122,20 @@ export default function ClientPlanPage() {
     }
   };
 
+  // Exports what is on screen, saved or not.
+  const runExport = async (write) => {
+    setMenuOpen(false);
+    setExporting(true);
+    setSaveError('');
+    try {
+      await write(planState);
+    } catch (err) {
+      setSaveError(`Export failed: ${err.message}`);
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const cards = [
     {
       label: 'INCOME / MO', color: '#2b3f86', value: incomeAmount,
@@ -150,6 +174,24 @@ export default function ClientPlanPage() {
         </div>
         <div className="plan__actions">
           {saveError && <p className="plan__error" role="alert">{saveError}</p>}
+          <div className="plan__export" ref={menuRef}>
+            <button
+              type="button" className="plan__export-btn" aria-haspopup="menu" aria-expanded={menuOpen}
+              disabled={exporting} onClick={() => setMenuOpen(!menuOpen)}
+            >
+              <Download size={15} /> {exporting ? 'Exporting…' : 'Export'} <ChevronDown size={14} />
+            </button>
+            {menuOpen && (
+              <div className="plan__menu" role="menu">
+                <button type="button" role="menuitem" onClick={() => runExport(exportExcel)}>
+                  <FileSpreadsheet size={16} className="plan__menu-xls" /> Excel workbook <small>.xlsx</small>
+                </button>
+                <button type="button" role="menuitem" onClick={() => runExport(exportPdf)}>
+                  <FileText size={16} className="plan__menu-pdf" /> PDF report <small>.pdf</small>
+                </button>
+              </div>
+            )}
+          </div>
           <button type="button" className="plan__save" onClick={save} disabled={saving || !dirty}>
             <Save size={15} /> {saving ? 'Saving…' : 'Save'}
           </button>
