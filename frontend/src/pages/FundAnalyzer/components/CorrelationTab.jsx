@@ -1,0 +1,11 @@
+import { useState } from 'react';
+
+const cellColor = (value) => value == null ? '#f4f1e9' : `rgba(47, 111, 222, ${0.12 + 0.88 * Math.min(Math.abs(value), 1)})`;
+
+export default function CorrelationTab({ funds, correlation }) {
+  const [active, setActive] = useState(null);
+  if (funds.length < 2) return <p className="fa-card fa__empty">Add at least two funds to compare daily-return correlation.</p>;
+  const pair = active || { left: funds[0].scheme_code, right: funds[1].scheme_code };
+  const selected = correlation?.[pair.left]?.[pair.right];
+  return <><section className="fa-card fa-matrix"><div className="fa-section-head fa-section-head--flush"><h2>Daily-return correlation</h2><p>Calculated from overlapping live NAV history. 1.00 means they moved together; −1.00 means opposite movement.</p></div><div className="fa-matrix__scroll"><div className="fa-matrix__grid" style={{ gridTemplateColumns: `150px repeat(${funds.length}, minmax(76px, 1fr))` }}><span />{funds.map((fund) => <span key={fund.scheme_code} className="fa-matrix__col"><i style={{ background: fund.color }} />{fund.scheme_name.slice(0, 20)}</span>)}{funds.map((rowFund) => [<span key={`${rowFund.scheme_code}-label`} className="fa-matrix__row">{rowFund.scheme_name.slice(0, 20)} <i style={{ background: rowFund.color }} /></span>, ...funds.map((colFund) => rowFund.scheme_code === colFund.scheme_code ? <span key={colFund.scheme_code} className="fa-matrix__self">—</span> : <button key={colFund.scheme_code} type="button" className="fa-matrix__cell" style={{ background: cellColor(correlation?.[rowFund.scheme_code]?.[colFund.scheme_code]) }} onClick={() => setActive({ left: rowFund.scheme_code, right: colFund.scheme_code })}>{correlation?.[rowFund.scheme_code]?.[colFund.scheme_code] == null ? '—' : correlation[rowFund.scheme_code][colFund.scheme_code].toFixed(2)}</button>)])}</div></div></section><section className="fa-card fa-pair"><div className="fa-section-head fa-section-head--flush"><h2>Selected relationship</h2><p>{funds.find((fund) => fund.scheme_code === pair.left)?.scheme_name} × {funds.find((fund) => fund.scheme_code === pair.right)?.scheme_name}</p></div><strong className="fa-pair__total">{selected == null ? '—' : selected.toFixed(3)}</strong><span>Correlation of daily NAV returns</span></section></>;
+}

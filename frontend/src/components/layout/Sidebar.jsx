@@ -8,7 +8,7 @@ import './Sidebar.css';
 const NAV_ITEMS = [
   { to: '/client-reports', label: 'Client Reports', icon: LayoutGrid },
   { to: '/calculators', label: 'Calculators', icon: Calculator },
-  { to: '/mutual-fund', label: 'Mutual Fund', icon: PieChart },
+  { to: '/fund-analyzer', label: 'Fund Analyzer', icon: PieChart },
 ];
 
 export default function Sidebar({ open, onNavigate }) {

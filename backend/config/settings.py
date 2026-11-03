@@ -25,6 +25,7 @@ INSTALLED_APPS = [
     'api',
     'client_reports',
     'calculators',
+    'fund_analyzer',
 ]
 
 MIDDLEWARE = [
@@ -84,6 +85,7 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 CORS_ALLOWED_ORIGINS = [o.strip() for o in os.getenv('CORS_ALLOWED_ORIGINS', 'http://localhost:5173').split(',') if o.strip()]
+FUND_ANALYZER_RISK_FREE_RATE = float(os.getenv('FUND_ANALYZER_RISK_FREE_RATE', '0.065'))
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': ('rest_framework_simplejwt.authentication.JWTAuthentication',),
