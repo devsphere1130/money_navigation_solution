@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from django.conf import settings
-from rest_framework.permissions import AllowAny
+from rest_framework.parsers import FormParser, MultiPartParser
+from rest_framework.permissions import AllowAny, IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .providers import ProviderError
+from .holdings import import_portfolio_holdings
 from .serializers import CompareRequestSerializer, CompareResponseSerializer, FundDetailSerializer, FundSearchResponseSerializer, FundSearchResultSerializer
 from .services import compare_funds, compare_holdings_overlap, fetch_fund_data, fetch_fundamentals, search_funds
 
@@ -83,3 +85,26 @@ class FundOverlapView(APIView):
             return Response(compare_holdings_overlap(request_serializer.validated_data['scheme_codes']))
         except ProviderError as exc:
             return Response({'detail': str(exc), 'available': False}, status=503)
+
+
+class FundOverlapImportView(APIView):
+    permission_classes = [IsAdminUser]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        uploaded = request.FILES.get('file')
+        if not uploaded or not request.data.get('scheme_code') or not request.data.get('portfolio_date'):
+            return Response({'detail': 'file, scheme_code and portfolio_date are required'}, status=400)
+        if uploaded.size > 15 * 1024 * 1024:
+            return Response({'detail': 'Portfolio disclosure file must be 15 MB or smaller'}, status=400)
+        try:
+            result = import_portfolio_holdings(
+                str(request.data['scheme_code']),
+                str(request.data['portfolio_date']),
+                uploaded.name,
+                uploaded.read(),
+                str(request.data.get('source_url') or ''),
+            )
+            return Response(result)
+        except ProviderError as exc:
+            return Response({'detail': str(exc)}, status=400)
