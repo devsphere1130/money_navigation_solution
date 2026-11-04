@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from html.parser import HTMLParser
 from io import BytesIO
 from threading import Lock
+from typing import Any
 from urllib.parse import unquote, urljoin, urlsplit
 
 import pandas as pd
@@ -90,6 +91,26 @@ def _normalise_name(value: str) -> str:
 def _is_debt_fund(record: dict) -> bool:
     category = re.sub(r'\s+', ' ', str(record.get('category') or '')).strip().lower()
     return category.startswith('debt scheme') or category.startswith('debt fund')
+
+
+def _overlap_debug_record(code: str, record: dict | None = None, *, error: str | None = None) -> dict[str, Any]:
+    """Create a stable, JSON-serialisable diagnostic record for the overlap endpoint."""
+    record = record or {}
+    amc_name = record.get('amc') or None
+    return {
+        'scheme_code': str(code),
+        'scheme_name': record.get('scheme_name'),
+        'category': record.get('category'),
+        'amc': amc_name,
+        'amc_name': amc_name,
+        'amc_in_sources': bool(amc_name and amc_name in AMC_SOURCES),
+        'monthly_links_found': 0,
+        'months_found': [],
+        'chosen_common_month': None,
+        'matched_sheet_name': None,
+        'parse_result': None,
+        'error': error,
+    }
 
 
 def _scheme_link_matches(text: str, fund_name: str) -> bool:
@@ -256,7 +277,13 @@ def _workbook_sheets(payload: bytes, suffix: str) -> tuple[dict[str, pd.DataFram
     return frames, formats
 
 
-def _read_equity_holdings(payload: bytes, url: str, fund_name: str, parser_key: str) -> dict[str, float]:
+def _read_equity_holdings(
+    payload: bytes,
+    url: str,
+    fund_name: str,
+    parser_key: str,
+    diagnostics: dict[str, Any] | None = None,
+) -> dict[str, float]:
     suffix = urlsplit(url).path.lower()
     try:
         sheets, formats_by_sheet = _workbook_sheets(payload, suffix)
@@ -273,6 +300,8 @@ def _read_equity_holdings(payload: bytes, url: str, fund_name: str, parser_key: 
             raise ProviderError(f'No sheet matched fund {fund_name}')
     else:
         _, sheet_name, frame = ranked[0]
+    if diagnostics is not None:
+        diagnostics['matched_sheet_name'] = sheet_name
 
     header_candidates = []
     for row_index in range(min(len(frame), 80)):
@@ -363,6 +392,8 @@ def _read_equity_holdings(payload: bytes, url: str, fund_name: str, parser_key: 
     if not holdings:
         classification_note = ' Equity rows could not be identified.' if not saw_equity_classification and equity_context is None else ''
         raise ProviderError(f'No ISIN equity holdings found for {fund_name}.{classification_note}')
+    if diagnostics is not None:
+        diagnostics['parse_result'] = {'status': 'ok', 'holding_count': len(holdings)}
     return holdings
 
 
@@ -372,51 +403,72 @@ def calculate_overlap(holdings_a: dict[str, float], holdings_b: dict[str, float]
 
 def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
     if len(scheme_codes) < 2:
-        return {'portfolio_month': None, 'funds': [], 'pairs': [], 'highest_pair': None, 'available': False}
+        return {
+            'portfolio_month': None,
+            'funds': [],
+            'pairs': [],
+            'highest_pair': None,
+            'available': False,
+            'debug': [_overlap_debug_record(str(code), error='At least two funds are required for overlap comparison') for code in scheme_codes],
+        }
     try:
         latest_records = fetch_amfi_latest()
     except ProviderError:
+        debug = [_overlap_debug_record(str(code), error='AMC lookup unavailable') for code in scheme_codes]
+        logger.debug('Holdings overlap diagnostics: %s', debug)
         return {
             'portfolio_month': None,
             'funds': [{'scheme_code': str(code), 'available': False, 'reason': 'AMC lookup unavailable'} for code in scheme_codes],
             'pairs': [],
             'highest_pair': None,
             'available': False,
+            'debug': debug,
         }
     record_by_code = {str(row.get('scheme_code')): row for row in latest_records}
     fund_results = []
+    debug_by_code: dict[str, dict[str, Any]] = {}
     links_by_code: dict[str, list[dict[str, str]]] = {}
     source_by_code: dict[str, dict] = {}
 
     for code in scheme_codes:
-        record = record_by_code.get(str(code))
+        code = str(code)
+        record = record_by_code.get(code)
+        debug = _overlap_debug_record(code, record)
+        debug_by_code[code] = debug
         if not record:
-            fund_results.append({'scheme_code': str(code), 'available': False, 'reason': 'Fund is missing from the latest AMFI scheme list'})
+            debug['error'] = 'Fund is missing from the latest AMFI scheme list'
+            fund_results.append({'scheme_code': code, 'available': False, 'reason': debug['error']})
             continue
         amc_name = record.get('amc') or ''
         if _is_debt_fund(record):
+            debug['parse_result'] = {'status': 'skipped', 'reason': 'debt_fund_restriction'}
+            debug['error'] = 'Overlap not applicable for debt funds'
             fund_results.append({
-                'scheme_code': str(code),
+                'scheme_code': code,
                 'scheme_name': record.get('scheme_name'),
                 'amc': amc_name,
                 'available': False,
-                'reason': 'Overlap not applicable for debt funds',
+                'reason': debug['error'],
             })
             continue
         source = AMC_SOURCES.get(amc_name)
         if not source:
-            fund_results.append({'scheme_code': str(code), 'scheme_name': record.get('scheme_name'), 'amc': amc_name, 'available': False, 'reason': 'Overlap not available for this AMC'})
+            debug['error'] = 'Overlap not available for this AMC'
+            fund_results.append({'scheme_code': code, 'scheme_name': record.get('scheme_name'), 'amc': amc_name, 'available': False, 'reason': debug['error']})
             continue
         try:
             links = _monthly_files_for_fund(source, record.get('scheme_name') or '')
             if not links:
                 raise ProviderError('No monthly file found for the selected fund')
+            months = sorted({str(link.get('month')) for link in links if link.get('month')})
+            debug.update({'monthly_links_found': len(links), 'months_found': months})
             links_by_code[str(code)] = links
             source_by_code[str(code)] = source
-            fund_results.append({'scheme_code': str(code), 'scheme_name': record.get('scheme_name'), 'amc': amc_name, 'available': False, 'reason': 'Waiting for a common portfolio month'})
+            fund_results.append({'scheme_code': code, 'scheme_name': record.get('scheme_name'), 'amc': amc_name, 'available': False, 'reason': 'Waiting for a common portfolio month'})
         except ProviderError as exc:
             logger.warning('Portfolio link lookup failed for AMC %s: %s', amc_name, exc)
-            fund_results.append({'scheme_code': str(code), 'scheme_name': record.get('scheme_name'), 'amc': amc_name, 'available': False, 'reason': 'Overlap unavailable right now'})
+            debug['error'] = str(exc)
+            fund_results.append({'scheme_code': code, 'scheme_name': record.get('scheme_name'), 'amc': amc_name, 'available': False, 'reason': 'Overlap unavailable right now'})
 
     supported_codes = list(links_by_code)
     common_month: str | None = None
@@ -426,6 +478,10 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
             common_months.intersection_update(link['month'] for link in links_by_code[code])
         if common_months:
             common_month = max(common_months)
+    for code in supported_codes:
+        debug_by_code[code]['chosen_common_month'] = common_month
+        if common_month is None:
+            debug_by_code[code]['error'] = 'No common portfolio month found'
 
     holdings_by_code: dict[str, dict[str, float]] = {}
     if common_month:
@@ -434,21 +490,32 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
             source = source_by_code[code]
             link = next((item for item in links_by_code[code] if item['month'] == common_month), None)
             if not link:
+                debug_by_code[code]['parse_result'] = {'status': 'error'}
+                debug_by_code[code]['error'] = 'Chosen common month link was not found'
                 continue
             try:
                 if link['url'] not in downloaded:
                     downloaded[link['url']] = _download_cached(source['key'], common_month, link['url'])
-                holdings_by_code[code] = _read_equity_holdings(downloaded[link['url']], link['url'], record_by_code[code].get('scheme_name') or '', source['parser'])
+                holdings_by_code[code] = _read_equity_holdings(
+                    downloaded[link['url']],
+                    link['url'],
+                    record_by_code[code].get('scheme_name') or '',
+                    source['parser'],
+                    debug_by_code[code],
+                )
                 fund = next(item for item in fund_results if item['scheme_code'] == code)
                 fund.update({'available': True, 'reason': None, 'portfolio_month': common_month, 'holding_count': len(holdings_by_code[code])})
             except Exception as exc:
                 logger.warning('Portfolio parse failed for scheme %s: %s', code, exc)
+                debug_by_code[code]['parse_result'] = {'status': 'error'}
+                debug_by_code[code]['error'] = str(exc) or exc.__class__.__name__
                 fund = next(item for item in fund_results if item['scheme_code'] == code)
                 fund.update({'available': False, 'reason': 'Overlap unavailable right now'})
     else:
         for fund in fund_results:
             if fund.get('reason') == 'Waiting for a common portfolio month':
                 fund['reason'] = 'Overlap unavailable right now'
+                debug_by_code[fund['scheme_code']]['error'] = 'No common portfolio month found'
 
     pairs = []
     for left_index, left_code in enumerate(scheme_codes):
@@ -466,10 +533,13 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
             })
 
     highest_pair = max(pairs, key=lambda pair: pair['overlap_pct'], default=None)
+    debug = [debug_by_code[str(code)] for code in scheme_codes]
+    logger.debug('Holdings overlap diagnostics: %s', debug)
     return {
         'portfolio_month': common_month,
         'funds': fund_results,
         'pairs': pairs,
         'highest_pair': highest_pair,
         'available': highest_pair is not None,
+        'debug': debug,
     }

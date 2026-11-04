@@ -74,11 +74,17 @@ export default function FundAnalyzerPage() {
   useEffect(() => { const handleKey = (event) => { if (event.key === '/' && !['INPUT', 'TEXTAREA'].includes(event.target.tagName)) { event.preventDefault(); document.querySelector('.fa-search__box input')?.focus(); } }; window.addEventListener('keydown', handleKey); return () => window.removeEventListener('keydown', handleKey); }, []);
 
   const { Component } = TABS.find((tab) => tab.key === activeTab);
+  const displayedFunds = activeTab === 'fundamentals'
+    ? funds.map((fund) => {
+      const metadata = fundMetadata[fund.scheme_code] || {};
+      return { ...fund, ...metadata, metrics: fund.metrics ?? metadata.metrics };
+    })
+    : funds;
   return <div className="fa">
     <header className="fa__header"><div><p className="fa__eyebrow"><i /> LIVE {source}</p><h1>Fund Analyzer</h1><p className="fa__sub">Compare live AMFI NAV history, returns, risk, correlation and published fund metadata for up to 8 schemes.</p></div><div className="fa__actions"><button type="button" className="fa__action" onClick={() => window.print()}><Printer size={15} /> Print report</button></div></header>
     <FundPicker selectedFunds={selectedFunds} onChange={setSelectedFunds} onClear={() => { overlapRequest.current += 1; setSelectedFunds([]); setFunds([]); setFundMetadata({}); setOverlap(null); setOverlapLoading(false); }} onUpdate={load} loading={loading} />
     {error && <p className="fa-notice" role="alert">{error}</p>}
-    {!funds.length && !loading ? <p className="fa-card fa__empty">Select AMFI schemes and press Update analysis to load live figures.</p> : <>{funds.length > 0 && <><SummaryCards funds={funds} overlap={overlap} overlapLoading={overlapLoading} /><div className="fa__tabbar"><nav className="fa__tabs" role="tablist">{TABS.map(({ key, label, icon: Icon }) => <button key={key} type="button" role="tab" aria-selected={activeTab === key} className={`fa__tab${activeTab === key ? ' fa__tab--active' : ''}`} onClick={() => setActiveTab(key)}><Icon size={15} /> {label}</button>)}</nav><span className="fa__navdate">{source} as of {asOfDate || '—'}</span></div><Component funds={funds.map((fund) => ({ ...fund, ...(fundMetadata[fund.scheme_code] || {}) }))} correlation={correlation} riskFreeRate={riskFreeRate} loading={fundamentalsLoading} error={fundamentalsError} /></>}</>}
+    {!funds.length && !loading ? <p className="fa-card fa__empty">Select AMFI schemes and press Update analysis to load live figures.</p> : <>{funds.length > 0 && <><SummaryCards funds={funds} overlap={overlap} overlapLoading={overlapLoading} /><div className="fa__tabbar"><nav className="fa__tabs" role="tablist">{TABS.map(({ key, label, icon: Icon }) => <button key={key} type="button" role="tab" aria-selected={activeTab === key} className={`fa__tab${activeTab === key ? ' fa__tab--active' : ''}`} onClick={() => setActiveTab(key)}><Icon size={15} /> {label}</button>)}</nav><span className="fa__navdate">{source} as of {asOfDate || '—'}</span></div><Component funds={displayedFunds} correlation={correlation} riskFreeRate={riskFreeRate} loading={fundamentalsLoading} error={fundamentalsError} /></>}</>}
     <p className="fa__disclaimer">Mutual fund investments are subject to market risks; read all scheme-related documents carefully. Past performance may or may not be sustained in future.</p>
   </div>;
 }

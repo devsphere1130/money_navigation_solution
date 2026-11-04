@@ -25,14 +25,14 @@ export default function SummaryCards({ funds, overlap, overlapLoading }) {
     ? new Date(`${overlap.portfolio_month}-01T00:00:00`).toLocaleString('en', { month: 'short', year: 'numeric' })
     : null;
   const overlapCaption = overlapLoading
-    ? 'Loading monthly holdings…'
+    ? 'Loading monthly holdings...'
     : highestPair && leftFund && rightFund
-      ? <><i style={{ background: leftFund.color }} /><i style={{ background: rightFund.color }} />{leftFund.scheme_name} × {rightFund.scheme_name}{portfolioMonth && <small>Portfolio: {portfolioMonth}</small>}</>
+      ? <><i style={{ background: leftFund.color }} /><i style={{ background: rightFund.color }} />{leftFund.scheme_name} / {rightFund.scheme_name}{portfolioMonth && <small>Portfolio: {portfolioMonth}</small>}</>
       : unavailableReason || 'Overlap data unavailable';
   return <section className="fa-stats">
     <Card dark icon={TrendingUp} label="TOP 3Y CAGR" value={signedPct(topCagr?.metrics?.r3y)} caption={topCagr?.scheme_name || 'Not enough history'} />
     <Card icon={Star} label="BEST RISK-ADJUSTED" value={bestSharpe?.metrics?.sharpe == null ? '—' : <>{bestSharpe.metrics.sharpe.toFixed(2)} <small>Sharpe</small></>} caption={bestSharpe?.scheme_name || 'Not enough history'} />
     <Card icon={Shield} label="LOWEST VOLATILITY" value={lowestVol?.metrics?.volatility == null ? '—' : `${(lowestVol.metrics.volatility * 100).toFixed(2)}%`} caption={lowestVol?.scheme_name || 'Not enough history'} />
-    <Card icon={CircleDot} label="HIGHEST OVERLAP" value={overlapLoading ? '…' : highestPair ? `${highestPair.overlap_pct.toFixed(1)}%` : '—'} caption={overlapCaption} />
+    <Card icon={CircleDot} label="HIGHEST OVERLAP" value={overlapLoading ? '...' : highestPair ? `${highestPair.overlap_pct.toFixed(1)}%` : '—'} caption={overlapCaption} />
   </section>;
 }
