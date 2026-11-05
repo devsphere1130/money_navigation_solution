@@ -15,6 +15,7 @@ import requests
 from django.core.cache import cache
 
 from .providers import HEADERS, ProviderError, fetch_amfi_latest, fetch_url
+from .riskometer import read_scheme_riskometer
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,7 @@ PORTFOLIO_CACHE_SECONDS = 24 * 60 * 60
 PAGE_CACHE_SECONDS = 60 * 60
 PAGE_ERROR_CACHE_SECONDS = 5 * 60
 PORTFOLIO_LOOKBACK_MONTHS = 6
+TOP_SECTORS = 6
 PARSED_HOLDINGS_CACHE_SECONDS = 180 * 24 * 60 * 60
 PORTFOLIO_CACHE_MAX_BYTES = 128 * 1024 * 1024
 IMPORTED_HOLDINGS_CACHE_SECONDS = 70 * 24 * 60 * 60
@@ -143,12 +145,12 @@ def _parsed_links(scheme_code: str) -> list[dict[str, str]]:
     return cache.get(_parsed_index_key(scheme_code)) or []
 
 
-def _cache_parsed_holdings(scheme_code: str, reporting_date: str, holdings: dict[str, float], url: str) -> None:
+def _cache_parsed_holdings(scheme_code: str, reporting_date: str, holdings: dict[str, float], url: str, names: dict[str, str] | None = None, industries: dict[str, str] | None = None, benchmark: str | None = None, risk_level: str | None = None) -> None:
     month = reporting_date[:7]
     cache_key = f'fund-analyzer:portfolio-parsed:{scheme_code}:{month}'
     link = {'url': url, 'cache_key': cache_key, 'month': month, 'portfolio_date': reporting_date, 'cached': True}
     try:
-        cache.set(cache_key, {'holdings': holdings, 'portfolio_date': reporting_date}, timeout=PARSED_HOLDINGS_CACHE_SECONDS)
+        cache.set(cache_key, {'holdings': holdings, 'names': names or {}, 'industries': industries or {}, 'benchmark': benchmark, 'risk_level': risk_level, 'portfolio_date': reporting_date}, timeout=PARSED_HOLDINGS_CACHE_SECONDS)
         existing = cache.get(_parsed_index_key(scheme_code)) or []
         links = [link, *(item for item in existing if item.get('month') != month)]
         links.sort(key=lambda item: item['month'], reverse=True)
@@ -477,6 +479,33 @@ def _as_weight(value, number_format: str = '') -> float | None:
         return None
 
 
+def _clean_holding_name(value: Any) -> str:
+    """AMC files add footnote marks to names, such as 'HDFC Bank Ltd.£'."""
+    if pd.isna(value):
+        return ''
+    return re.sub(r'[^\w.)]+$', '', re.sub(r'\s+', ' ', str(value)).strip())
+
+
+def _name_and_industry_columns(frame: pd.DataFrame, header_at: int, asset_at: int | None) -> tuple[int | None, int | None]:
+    headers = [re.sub(r'[^a-z0-9%]+', ' ', str(value).lower()).strip() if not pd.isna(value) else '' for value in frame.iloc[header_at].tolist()]
+    name_at = _column_index(headers, ('name of',))
+    if name_at is None:
+        name_at = _column_index(headers, ('instrument', 'security', 'company', 'scrip'))
+    return (None if name_at == asset_at else name_at), _column_index(headers, ('industry',))
+
+
+def _benchmark_from_frame(frame: pd.DataFrame) -> str | None:
+    """AMC files name the benchmark in a note, as 'Benchmark Name : X' or 'Portfolio Benchmark "X"'."""
+    for row in frame.itertuples(index=False, name=None):
+        for value in row:
+            if pd.isna(value) or 'benchmark' not in str(value).lower():
+                continue
+            match = re.search(r'(?i)benchmark\s+name\s*[:\-–]\s*(.+)|portfolio\s+benchmark\s+"([^"]+)"', str(value))
+            if match:
+                return re.sub(r'\s+', ' ', match.group(1) or match.group(2)).strip()[:80]
+    return None
+
+
 def _workbook_sheets(payload: bytes, suffix: str) -> tuple[dict[str, pd.DataFrame], dict[str, list[list[str]]]]:
     if suffix.endswith('.csv'):
         for encoding in ('utf-8-sig', 'cp1252'):
@@ -598,6 +627,9 @@ def _read_equity_holdings(
             equity_context = section
 
     holdings: dict[str, float] = {}
+    names: dict[str, str] = {}
+    industries: dict[str, str] = {}
+    name_at, industry_at = _name_and_industry_columns(frame, header_at, asset_at)
     saw_equity_classification = False
     cell_formats = formats_by_sheet.get(sheet_name, [])
     for row_index in range(header_at + 1, section_end):
@@ -631,6 +663,10 @@ def _read_equity_holdings(
         if len(isin) != 12 or not isin.isalnum() or weight is None:
             continue
         holdings[isin] = holdings.get(isin, 0.0) + weight
+        if name_at is not None and name_at < len(row):
+            names.setdefault(isin, _clean_holding_name(row[name_at]))
+        if industry_at is not None and industry_at < len(row):
+            industries.setdefault(isin, _clean_holding_name(row[industry_at]))
 
     if not holdings:
         classification_note = ' Equity rows could not be identified.' if not saw_equity_classification and equity_context is None else ''
@@ -639,11 +675,33 @@ def _read_equity_holdings(
         raise ProviderError(f'Equity holdings weights exceed 100% for {fund_name}')
     if diagnostics is not None:
         diagnostics['parse_result'] = {'status': 'ok', 'holding_count': len(holdings)}
+        diagnostics['holding_names'] = names
+        diagnostics['holding_industries'] = industries
+        diagnostics['benchmark'] = _benchmark_from_frame(frame)
+        try:
+            diagnostics['risk_level'] = read_scheme_riskometer(payload, sheet_name, frame)
+        except Exception:
+            # The riskometer is optional. It must never stop the holdings being used.
+            logger.exception('Riskometer read failed for %s', fund_name)
+            diagnostics['risk_level'] = None
     return holdings
 
 
 def calculate_overlap(holdings_a: dict[str, float], holdings_b: dict[str, float]) -> float:
     return sum(min(holdings_a[isin], holdings_b[isin]) for isin in holdings_a.keys() & holdings_b.keys())
+
+
+def _common_holdings(left: dict[str, Any], right: dict[str, Any]) -> list[dict[str, Any]]:
+    """The stocks behind calculate_overlap, largest contribution first."""
+    left_weights, right_weights = left['holdings'], right['holdings']
+    left_names, right_names = left.get('names') or {}, right.get('names') or {}
+    common = sorted(left_weights.keys() & right_weights.keys(), key=lambda isin: (-min(left_weights[isin], right_weights[isin]), isin))
+    return [{
+        'isin': isin,
+        'name': left_names.get(isin) or right_names.get(isin) or isin,
+        'left_weight': round(left_weights[isin], 2),
+        'right_weight': round(right_weights[isin], 2),
+    } for isin in common]
 
 
 def import_portfolio_holdings(scheme_code: str, portfolio_date: str, filename: str, payload: bytes, source_url: str = '') -> dict[str, Any]:
@@ -684,7 +742,11 @@ def import_portfolio_holdings(scheme_code: str, portfolio_date: str, filename: s
         'imported': True,
     }
     try:
-        cache.set(cache_key, {'holdings': holdings, 'source_url': source_url}, timeout=IMPORTED_HOLDINGS_CACHE_SECONDS)
+        cache.set(cache_key, {
+            'holdings': holdings, 'names': diagnostics.get('holding_names') or {},
+            'industries': diagnostics.get('holding_industries') or {}, 'benchmark': diagnostics.get('benchmark'),
+            'risk_level': diagnostics.get('risk_level'), 'source_url': source_url,
+        }, timeout=IMPORTED_HOLDINGS_CACHE_SECONDS)
         index_key = _import_index_key(amc_name, code)
         existing = cache.get(index_key) or []
         links = [link, *(item for item in existing if item.get('portfolio_date') != link['portfolio_date'])]
@@ -721,6 +783,141 @@ def _empty_highest_overlap(total_pairs: int) -> dict[str, Any]:
         'total_pairs': total_pairs,
         'message': 'Portfolio holdings unavailable',
     }
+
+
+def _holdings_from_link(
+    code: str,
+    month: str,
+    link: dict[str, Any],
+    source: dict[str, Any],
+    scheme_name: str,
+    debug: dict[str, Any],
+    downloaded: dict[str, bytes],
+    workbooks: dict[str, tuple[dict[str, pd.DataFrame], dict[str, list[list[str]]]]],
+) -> dict[str, Any]:
+    """Load one month's verified holdings from a cached entry or a disclosure file."""
+    if link.get('imported') or link.get('cached'):
+        cached = cache.get(link['cache_key'])
+        if not cached or not cached.get('holdings'):
+            raise ProviderError('Cached monthly holdings expired')
+        holdings = cached['holdings']
+        names = cached.get('names') or {}
+        industries = cached.get('industries') or {}
+        benchmark = cached.get('benchmark')
+        risk_level = cached.get('risk_level')
+        reporting_date = cached.get('portfolio_date') or link.get('portfolio_date')
+        debug['parse_result'] = {
+            'status': 'ok', 'holding_count': len(holdings),
+            'source': 'monthly_import' if link.get('imported') else 'parsed_cache',
+        }
+    else:
+        if link['url'] not in downloaded:
+            downloaded[link['url']] = _download_cached(source['key'], month, link['url'])
+        if link['url'] not in workbooks:
+            workbooks[link['url']] = _workbook_sheets(downloaded[link['url']], urlsplit(link['url']).path.lower())
+        holdings = _read_equity_holdings(
+            downloaded[link['url']], link['url'], scheme_name, source['parser'],
+            debug, workbooks[link['url']],
+        )
+        # These belong with the holdings, not in the debug response.
+        names = debug.pop('holding_names', {})
+        industries = debug.pop('holding_industries', {})
+        benchmark = debug.pop('benchmark', None)
+        risk_level = debug.pop('risk_level', None)
+        reporting_date = debug.get('reporting_date')
+    if not reporting_date:
+        raise ProviderError('Portfolio reporting date was not found inside the disclosure file')
+    if reporting_date[:7] != month:
+        raise ProviderError(f'Portfolio file reports {reporting_date}, not {month}')
+    source_label = (debug.get('parse_result') or {}).get('source')
+    debug['parse_result'] = {
+        'status': 'ok', 'holding_count': len(holdings),
+        **({'source': source_label} if source_label else {}),
+    }
+    if link.get('cached') or link.get('imported'):
+        debug['matched_sheet_name'] = 'Cached holdings'
+    if not link.get('imported') and not link.get('cached'):
+        _cache_parsed_holdings(code, reporting_date, holdings, link['url'], names, industries, benchmark, risk_level)
+    return {
+        'holdings': holdings, 'names': names, 'industries': industries, 'benchmark': benchmark, 'risk_level': risk_level, 'portfolio_date': reporting_date,
+        'matched_sheet_name': debug['matched_sheet_name'],
+        'source': source_label,
+    }
+
+
+def _asset_allocation(weights: dict[str, float]) -> dict[str, float]:
+    """Split by ISIN country. Other is what the equity rows leave: debt, cash and REITs."""
+    indian = sum(weight for isin, weight in weights.items() if isin.startswith('IN'))
+    international = sum(weights.values()) - indian
+    return {
+        'indian_equity': round(indian, 2),
+        'international_equity': round(international, 2),
+        'other': round(max(0.0, 100 - indian - international), 2),
+    }
+
+
+def _sector_allocation(weights: dict[str, float], industries: dict[str, str]) -> list[dict[str, Any]]:
+    """Largest industries as the AMC labels them, with the remainder grouped as Others."""
+    if not any(industries.values()):
+        return []
+    totals: dict[str, float] = {}
+    for isin, weight in weights.items():
+        sector = industries.get(isin) or 'Others'
+        totals[sector] = totals.get(sector, 0.0) + weight
+    others = totals.pop('Others', 0.0)
+    ranked = sorted(totals.items(), key=lambda item: (-item[1], item[0]))
+    others += sum(weight for _, weight in ranked[TOP_SECTORS:])
+    rows = [{'name': name, 'weight': round(weight, 2)} for name, weight in ranked[:TOP_SECTORS]]
+    return [*rows, {'name': 'Others', 'weight': round(others, 2)}] if others > 0 else rows
+
+
+def fetch_fund_holdings(code: str, record: dict[str, Any] | None) -> dict[str, Any]:
+    """Latest verified equity holdings for one fund, largest first, with their breakdowns."""
+    empty = {'holdings': [], 'holdings_as_of': None, 'benchmark': None, 'allocation': None, 'sectors': [], 'riskometer': None}
+    if not record or _is_debt_fund(record):
+        return empty
+    amc_name = record.get('amc') or ''
+    try:
+        links = [*_imported_links(amc_name, code), *_parsed_links(code)]
+    except Exception as exc:
+        logger.warning('Portfolio holdings cache unavailable for %s: %s', code, exc)
+        links = []
+    source = AMC_SOURCES.get(amc_name)
+    if source:
+        try:
+            links += _monthly_files_for_fund(source, record.get('scheme_name') or '')
+        except ProviderError as exc:
+            logger.warning('Portfolio link lookup failed for AMC %s: %s', amc_name, exc)
+    recent_months = _recent_portfolio_months()
+    # A stable sort keeps uploaded and cached entries ahead of downloads within a month.
+    links = sorted((link for link in links if link.get('month') in recent_months), key=lambda link: link['month'], reverse=True)
+    source = source or {'key': _amc_directory_name(amc_name), 'parser': 'import_by_code'}
+    debug = _overlap_debug_record(code, record)
+    downloaded: dict[str, bytes] = {}
+    workbooks: dict[str, tuple[dict[str, pd.DataFrame], dict[str, list[list[str]]]]] = {}
+    for link in links:
+        try:
+            result = _holdings_from_link(code, link['month'], link, source, record.get('scheme_name') or '', debug, downloaded, workbooks)
+        except Exception as exc:
+            logger.warning('Portfolio %s failed for scheme %s: %s', link['month'], code, str(exc) or exc.__class__.__name__)
+            continue
+        weights, names = result['holdings'], result['names']
+        return {
+            'holdings': [
+                {'isin': isin, 'name': names.get(isin) or isin, 'weight': round(weights[isin], 2)}
+                for isin in sorted(weights, key=lambda isin: (-weights[isin], isin))
+            ],
+            'holdings_as_of': result['portfolio_date'],
+            'benchmark': result.get('benchmark'),
+            'allocation': _asset_allocation(weights),
+            'sectors': _sector_allocation(weights, result.get('industries') or {}),
+            'riskometer': {
+                'level': result['risk_level'],
+                'as_of': result['portfolio_date'],
+                'source': 'Official AMC Disclosure',
+            } if result.get('risk_level') else None,
+        }
+    return empty
 
 
 def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
@@ -833,46 +1030,10 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
             debug['attempted_months'].append(month)
             for link in links:
                 try:
-                    if link.get('imported') or link.get('cached'):
-                        cached = cache.get(link['cache_key'])
-                        if not cached or not cached.get('holdings'):
-                            raise ProviderError('Cached monthly holdings expired')
-                        holdings = cached['holdings']
-                        reporting_date = cached.get('portfolio_date') or link.get('portfolio_date')
-                        debug['parse_result'] = {
-                            'status': 'ok', 'holding_count': len(holdings),
-                            'source': 'monthly_import' if link.get('imported') else 'parsed_cache',
-                        }
-                    else:
-                        source = source_by_code[code]
-                        if link['url'] not in downloaded:
-                            downloaded[link['url']] = _download_cached(source['key'], month, link['url'])
-                        if link['url'] not in workbooks:
-                            workbooks[link['url']] = _workbook_sheets(downloaded[link['url']], urlsplit(link['url']).path.lower())
-                        holdings = _read_equity_holdings(
-                            downloaded[link['url']], link['url'],
-                            record_by_code[code].get('scheme_name') or '', source['parser'],
-                            debug, workbooks[link['url']],
-                        )
-                        reporting_date = debug.get('reporting_date')
-                    if not reporting_date:
-                        raise ProviderError('Portfolio reporting date was not found inside the disclosure file')
-                    if reporting_date[:7] != month:
-                        raise ProviderError(f'Portfolio file reports {reporting_date}, not {month}')
-                    source_label = (debug.get('parse_result') or {}).get('source')
-                    debug['parse_result'] = {
-                        'status': 'ok', 'holding_count': len(holdings),
-                        **({'source': source_label} if source_label else {}),
-                    }
-                    if link.get('cached') or link.get('imported'):
-                        debug['matched_sheet_name'] = 'Cached holdings'
-                    month_results[code] = {
-                        'holdings': holdings, 'portfolio_date': reporting_date,
-                        'matched_sheet_name': debug['matched_sheet_name'],
-                        'source': source_label,
-                    }
-                    if not link.get('imported') and not link.get('cached'):
-                        _cache_parsed_holdings(code, reporting_date, holdings, link['url'])
+                    month_results[code] = _holdings_from_link(
+                        code, month, link, source_by_code[code],
+                        record_by_code[code].get('scheme_name') or '', debug, downloaded, workbooks,
+                    )
                     break
                 except Exception as exc:
                     error = str(exc) or exc.__class__.__name__
@@ -920,7 +1081,9 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
                 month for month in candidate_months
                 if left_code in valid_by_month.get(month, {}) and right_code in valid_by_month[month]
             ), None)
-            if not pair_month:
+            # A selected fund can be excluded (debt fund, unsupported AMC) even when
+            # the other funds share a common month, so check both funds are present.
+            if not pair_month or left_code not in valid_by_month[pair_month] or right_code not in valid_by_month[pair_month]:
                 continue
             left_data = valid_by_month[pair_month][left_code]
             right_data = valid_by_month[pair_month][right_code]
@@ -930,6 +1093,7 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
                 'left': {'scheme_code': left_code, 'scheme_name': left_record.get('scheme_name')},
                 'right': {'scheme_code': right_code, 'scheme_name': right_record.get('scheme_name')},
                 'overlap_pct': calculate_overlap(left_data['holdings'], right_data['holdings']),
+                'common_holdings': _common_holdings(left_data, right_data),
                 'portfolio_month': pair_month,
                 'portfolio_date': left_data['portfolio_date'] if left_data['portfolio_date'] == right_data['portfolio_date'] else None,
             })
@@ -948,16 +1112,7 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
     elif 'Overlap not available for this AMC' in unavailable_reasons:
         unavailable_message = 'Overlap not available for this AMC'
     else:
-        missing_names = [
-            str(fund['scheme_name'])
-            for fund in fund_results
-            if not fund.get('available') and fund.get('scheme_name')
-            and (fund['scheme_code'] not in links_by_code or debug_by_code[fund['scheme_code']]['attempted_months'])
-        ]
-        unavailable_message = (
-            f"Monthly holdings unavailable for {', '.join(missing_names)}"
-            if missing_names else 'No common monthly portfolio holdings available'
-        )
+        unavailable_message = 'Portfolio holdings unavailable'
     highest_overlap = {
         'available': highest_pair is not None,
         'percentage': round(highest_pair['overlap_pct'], 2) if highest_pair else None,

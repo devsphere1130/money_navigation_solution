@@ -377,6 +377,14 @@ td.fa-table__fund em {
 /* Overlap */
 .fa-matrix, .fa-pair, .fa-pairs { padding: 20px 22px; }
 
+.fa-overlap { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 14px; align-items: start; }
+.fa-overlap > * { min-width: 0; }
+.fa-pairs { margin-top: 14px; }
+.fa-pair__list { max-height: 340px; overflow-y: auto; }
+.fa-pair__total small { display: block; margin-top: 3px; font-size: 10px; color: var(--color-gray); }
+.fa-pairs__body, .fa-pairs__names, .fa-pairs__stocks { display: flex; }
+.fa-pairs__body { flex-direction: column; }
+
 .fa-matrix__scroll { overflow-x: auto; }
 
 .fa-matrix__grid { display: grid; gap: 2px; min-width: max-content; font-size: 11px; }
@@ -468,17 +476,35 @@ td.fa-table__fund em {
 .fa-fund__head h3 { margin: 0; font-size: 15px; font-weight: 600; color: var(--color-black); }
 .fa-fund__head p { margin: 3px 0 0; font-size: 11px; color: var(--color-gray); }
 
-.fa-fund__risk { display: inline-flex; align-items: center; flex-shrink: 0; gap: 5px; padding: 3px 9px; border-radius: 10px; background: #fbeceb; font-size: 10px; font-weight: 600; color: var(--fa-down); }
-.fa-fund__risk i { width: 6px; height: 6px; border-radius: 50%; background: var(--fa-down); }
+.fa-fund__risk { flex-shrink: 0; padding: 3px 10px; border-radius: 999px; font-size: 10px; font-weight: 600; white-space: nowrap; }
+.fa-fund__risk--low { background: #dff3e6; color: #14613a; }
+.fa-fund__risk--low-to-moderate { background: #eaf6d6; color: #47650f; }
+.fa-fund__risk--moderate { background: #fcf5c9; color: #665300; }
+.fa-fund__risk--moderately-high { background: #fbe9c3; color: #744e00; }
+.fa-fund__risk--high { background: #fde1cb; color: #8a3f0c; }
+.fa-fund__risk--very-high { background: #fbe1df; color: #a1271d; }
+.fa-fund__risk--none { background: #f1efe9; color: #5f6470; }
 
 .fa-fund__metrics { display: grid; grid-template-columns: repeat(4, 1fr); margin: 0; border-top: 1px solid var(--fa-border); border-bottom: 1px solid var(--fa-border); background: #fdfcf9; }
 .fa-fund__metrics > div { min-width: 0; padding: 12px 16px; }
 .fa-fund__metrics > div + div { border-left: 1px solid var(--fa-border); }
 .fa-fund__metrics dt { font-size: 9px; font-weight: 700; letter-spacing: 1px; color: #6b6b6b; }
 .fa-fund__metrics dd { margin: 5px 0 0; font-size: 14px; font-weight: 700; }
-.fa-fund__details { padding: 14px 20px 6px; }
+.fa-fund__section { padding: 14px 20px 6px; }
 .fa-fund__details-head { display: flex; justify-content: space-between; gap: 8px; margin: 0 0 10px; font-size: 10px; font-weight: 700; letter-spacing: 1px; color: #6b6b6b; }
-.fa-fund__details p { margin: 0; font-size: 12px; line-height: 1.7; color: var(--color-gray); }
+.fa-fund__details-head small { font-size: 10px; font-weight: 500; letter-spacing: 0; color: var(--color-gray); }
+.fa-fund__empty { margin: 8px 0 14px; font-size: 12px; color: var(--color-gray); }
+.fa-fund__ids { margin: 12px 0 4px; font-size: 11px; line-height: 1.6; color: var(--color-gray); }
+
+.fa-fund__holdings { margin: 0; padding: 0; list-style: none; }
+.fa-fund__holdings--all { max-height: 340px; overflow-y: auto; padding-right: 8px; }
+.fa-fund__holding { display: flex; gap: 14px; padding: 6px 0 8px; }
+.fa-fund__rank { flex-shrink: 0; width: 18px; font-size: 11px; font-weight: 600; color: var(--fa-muted); }
+.fa-fund__holding > div { flex: 1; min-width: 0; }
+.fa-fund__holding p { display: flex; justify-content: space-between; gap: 12px; margin: 0 0 6px; font-size: 12px; color: var(--color-black); }
+.fa-fund__holding strong { flex-shrink: 0; font-weight: 600; }
+.fa-fund__holding i { display: block; height: 3px; border-radius: 2px; background: #f3efe5; }
+.fa-fund__holding b { display: block; height: 100%; border-radius: 2px; background: var(--fa-navy); }
 
 .fa-fund__foot { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 20px 16px; font-size: 11px; color: var(--color-gray); }
 .fa-fund__foot strong { color: var(--fa-navy); }
@@ -496,14 +522,80 @@ td.fa-table__fund em {
   cursor: pointer;
 }
 
+/* Fund detail */
+.fa-detail__back { margin-bottom: 14px; }
+.fa-detail__layout { display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 14px; align-items: start; }
+
+.fa-detail__funds { display: flex; flex-direction: column; gap: 4px; padding: 8px; }
+.fa-detail__funds button { display: flex; align-items: center; gap: 9px; width: 100%; padding: 9px 10px; border: 0; border-radius: 8px; background: none; color: #4a5266; font-size: 12px; font-weight: 500; text-align: left; cursor: pointer; }
+.fa-detail__funds button:hover { background: #fdfcf9; }
+.fa-detail__funds button.is-active { background: var(--fa-navy); color: var(--color-white); font-weight: 600; }
+.fa-detail__funds i { flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%; }
+
+.fa-detail { min-width: 0; overflow: hidden; }
+.fa-detail__head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; padding: 20px 22px 16px; }
+.fa-detail__amc { margin: 0 0 3px; font-size: 10px; font-weight: 700; letter-spacing: 1px; color: #6b6b6b; text-transform: uppercase; }
+.fa-detail__head h3 { margin: 0; font-size: 20px; font-weight: 600; color: var(--color-black); }
+.fa-detail__tags { display: flex; flex-wrap: wrap; gap: 5px; margin: 9px 0 0; padding: 0; list-style: none; }
+.fa-detail__tags li { padding: 2px 8px; border: 1px solid var(--fa-border); border-radius: 6px; font-size: 10px; color: #4a5266; }
+.fa-detail__nav { flex-shrink: 0; text-align: right; }
+.fa-detail__nav small { display: block; font-size: 10px; color: var(--color-gray); }
+.fa-detail__nav strong { display: block; margin: 2px 0; font-size: 22px; font-weight: 700; }
+
+.fa-detail__facts { display: grid; grid-template-columns: repeat(4, 1fr); margin: 0; border-top: 1px solid var(--fa-border); }
+.fa-detail__facts > div { min-width: 0; padding: 12px 22px; border-bottom: 1px solid var(--fa-border); }
+.fa-detail__facts > div:not(:nth-child(4n + 1)) { border-left: 1px solid var(--fa-border); }
+.fa-detail__facts dt { font-size: 9px; font-weight: 700; letter-spacing: 1px; color: #6b6b6b; }
+.fa-detail__facts dd { margin: 5px 0 0; overflow: hidden; font-size: 14px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+
+.fa-detail__body { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.fa-detail__panel { min-width: 0; padding: 18px 22px; }
+.fa-detail__panel + .fa-detail__panel { border-left: 1px solid var(--fa-border); }
+.fa-detail__panel h4 { display: flex; align-items: center; gap: 7px; margin: 0 0 12px; font-size: 10px; font-weight: 700; letter-spacing: 1px; color: var(--fa-navy); }
+.fa-detail__panel h4 svg { color: #c29035; }
+.fa-detail__panel h4 small { margin-left: auto; font-size: 10px; font-weight: 500; letter-spacing: 0; color: var(--color-gray); }
+.fa-detail__subhead { margin-top: 22px !important; }
+.fa-detail__more { margin-top: 6px; padding: 2px 0; border: 0; background: none; color: var(--fa-navy); font-size: 11px; font-weight: 600; cursor: pointer; }
+
+.fa-detail__bar { display: flex; height: 10px; overflow: hidden; border-radius: 3px; background: #f3efe5; }
+.fa-detail__bar i { display: block; height: 100%; }
+.fa-detail__part--indian { background: var(--fa-navy); }
+.fa-detail__part--foreign { background: #c29035; }
+.fa-detail__part--other { background: #cfc8b8; }
+.fa-detail__legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 10px 0 0; padding: 0; list-style: none; font-size: 11px; color: var(--color-gray); }
+.fa-detail__legend li { display: flex; align-items: center; gap: 5px; }
+.fa-detail__legend i { width: 8px; height: 8px; border-radius: 2px; }
+.fa-detail__legend strong { color: var(--fa-navy); font-weight: 600; }
+
+.fa-detail__sectors { margin: 0; padding: 0; list-style: none; }
+.fa-detail__sectors li { display: grid; grid-template-columns: minmax(0, 118px) minmax(0, 1fr) 50px; align-items: center; gap: 10px; padding: 6px 0; font-size: 11px; color: #4a5266; }
+.fa-detail__sectors span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fa-detail__sectors i { display: block; height: 7px; border-radius: 4px; background: #f3efe5; }
+.fa-detail__sectors b { display: block; height: 100%; border-radius: 4px; background: #c29035; }
+.fa-detail__sectors b.fa-detail__sector--others { background: #cfc8b8; }
+.fa-detail__sectors strong { font-weight: 600; color: var(--fa-navy); text-align: right; }
+
+.fa-detail__foot { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 6px 14px; padding: 12px 22px; border-top: 1px solid var(--fa-border); font-size: 11px; color: var(--color-gray); }
+
 .fa__disclaimer { margin: 20px 0 0; font-size: 11px; line-height: 1.5; color: var(--fa-muted); }
 
 @media (max-width: 1100px) {
   .fa-stats { grid-template-columns: repeat(2, 1fr); }
 }
 
+@media (max-width: 900px) {
+  .fa-overlap { grid-template-columns: 1fr; }
+}
+
 @media (max-width: 760px) {
   .fa-funds { grid-template-columns: 1fr; }
+  .fa-detail__layout, .fa-detail__body { grid-template-columns: minmax(0, 1fr); }
+  .fa-detail__funds { flex-direction: row; overflow-x: auto; }
+  .fa-detail__funds button { flex-shrink: 0; width: auto; }
+  .fa-detail__panel + .fa-detail__panel { border-top: 1px solid var(--fa-border); border-left: 0; }
+  .fa-detail__facts { grid-template-columns: repeat(2, 1fr); }
+  .fa-detail__facts > div:not(:nth-child(4n + 1)) { border-left: 0; }
+  .fa-detail__facts > div:nth-child(even) { border-left: 1px solid var(--fa-border); }
 }
 
 @media (max-width: 520px) {

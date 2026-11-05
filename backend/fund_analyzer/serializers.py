@@ -54,6 +54,12 @@ class FundDetailSerializer(SourceSerializer):
     aum = serializers.FloatField(allow_null=True, required=False)
     aum_unit = serializers.CharField(allow_null=True, required=False)
     aum_as_of = serializers.CharField(allow_null=True, required=False)
+    holdings = serializers.ListField(child=serializers.DictField(), required=False)
+    holdings_as_of = serializers.CharField(allow_null=True, required=False)
+    benchmark = serializers.CharField(allow_null=True, required=False)
+    allocation = serializers.DictField(allow_null=True, required=False)
+    sectors = serializers.ListField(child=serializers.DictField(), required=False)
+    riskometer = serializers.DictField(allow_null=True, required=False)
     metrics = MetricSetSerializer(allow_null=True, required=False)
 
 

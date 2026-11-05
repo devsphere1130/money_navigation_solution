@@ -7,7 +7,7 @@ from time import perf_counter
 from typing import Any
 
 from .analytics import correlation, metrics
-from .holdings import analyze_holdings_overlap
+from .holdings import analyze_holdings_overlap, fetch_fund_holdings
 from .providers import (
     ProviderError,
     fetch_amfi_aum,
@@ -79,7 +79,7 @@ def fetch_fund_data(scheme_code: str, *, risk_free_rate: float = 0.065, include_
         aum, aum_as_of = (None, None)
         if include_metadata:
             ter, ter_as_of = fetch_amfi_ter(scheme_code, latest_records, ter_snapshot)
-            aum, aum_as_of = aum_data if aum_data is not None else fetch_amfi_aum(latest.get('scheme_name') or '')
+            aum, aum_as_of = aum_data if aum_data is not None else fetch_amfi_aum(latest.get('scheme_name') or '', latest.get('amc') or '')
         result = _base_detail(latest, source='AMFI', as_of=latest.get('date'))
         result.update({'ter': ter, 'ter_as_of': ter_as_of, 'aum': aum, 'aum_unit': 'lakhs' if aum is not None else None, 'aum_as_of': aum_as_of, 'history': history})
         result['metrics'] = metrics(history, risk_free_rate) if history else None
@@ -118,14 +118,23 @@ def compare_funds(scheme_codes: list[str], risk_free_rate: float = 0.065) -> dic
         # lets each fund go directly to the MFAPI fallback.
         latest_records = []
 
-    # History and analytics are the critical path for Compare. Load optional
-    # TER/AUM metadata only when the client opens Fundamentals.
+    # History and analytics are the critical path for Compare. AUM still loads only
+    # when the client opens Fundamentals.
     worker_count = min(4, len(scheme_codes))
     with ThreadPoolExecutor(max_workers=max(1, worker_count)) as pool:
         funds = list(pool.map(
             lambda code: fetch_fund_data(code, risk_free_rate=risk_free_rate, include_metadata=False, latest_records=latest_records),
             scheme_codes,
         ))
+    # TER shares a host with NAV history, and that host throttles bursts, so load it
+    # afterwards. A TER failure must not fail the comparison.
+    try:
+        ter_snapshot = fetch_amfi_ter_snapshot(scheme_codes, latest_records)
+    except Exception:
+        logger.exception('Fund Analyzer TER lookup failed')
+        ter_snapshot = {}
+    for fund in funds:
+        fund['ter'], fund['ter_as_of'] = ter_snapshot.get(fund['scheme_code'], (None, None))
     logger.info('Fund Analyzer comparison loaded %d funds in %.2fs', len(funds), perf_counter() - started)
     matrix = {fund['scheme_code']: {} for fund in funds}
     for left in funds:
@@ -157,14 +166,16 @@ def fetch_fundamentals(scheme_codes: list[str]) -> dict[str, Any]:
         for code in scheme_codes:
             try:
                 record = _pick_latest(latest_records, code)
-                result[code] = fetch_amfi_aum(record.get('scheme_name') or '')
+                result[code] = fetch_amfi_aum(record.get('scheme_name') or '', record.get('amc') or '')
             except ProviderError:
                 result[code] = (None, None)
         return result
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        ter_future = pool.submit(fetch_amfi_ter_snapshot, scheme_codes)
+    record_by_code = {str(record.get('scheme_code')): record for record in latest_records}
+    with ThreadPoolExecutor(max_workers=2 + min(4, len(scheme_codes))) as pool:
+        ter_future = pool.submit(fetch_amfi_ter_snapshot, scheme_codes, latest_records)
         aum_future = pool.submit(load_aum_values)
+        holdings_futures = {code: pool.submit(fetch_fund_holdings, str(code), record_by_code.get(str(code))) for code in scheme_codes}
         try:
             ter_snapshot = ter_future.result()
         except Exception:
@@ -175,6 +186,13 @@ def fetch_fundamentals(scheme_codes: list[str]) -> dict[str, Any]:
         except Exception:
             logger.exception('Fund Analyzer AUM lookup failed')
             aum_by_code = {}
+        holdings_by_code = {}
+        for code, future in holdings_futures.items():
+            try:
+                holdings_by_code[code] = future.result()
+            except Exception:
+                logger.exception('Fund Analyzer holdings lookup failed for %s', code)
+                holdings_by_code[code] = {'holdings': [], 'holdings_as_of': None, 'benchmark': None, 'allocation': None, 'sectors': [], 'riskometer': None}
 
     funds = []
     for code in scheme_codes:
@@ -187,6 +205,7 @@ def fetch_fundamentals(scheme_codes: list[str]) -> dict[str, Any]:
             'aum': aum,
             'aum_unit': 'lakhs' if aum is not None else None,
             'aum_as_of': aum_as_of,
+            **holdings_by_code[code],
         })
     return {'source': 'AMFI', 'funds': funds}
 

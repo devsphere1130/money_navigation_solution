@@ -4,8 +4,10 @@ import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
+from html import unescape
+from io import BytesIO
 from threading import BoundedSemaphore
-from time import perf_counter
+from time import perf_counter, sleep
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -17,14 +19,18 @@ logger = logging.getLogger(__name__)
 AMFI_NAV_URL = 'https://portal.amfiindia.com/spages/NAVAll.txt'
 AMFI_HISTORY_DOWNLOAD_URL = 'https://portal.amfiindia.com/DownloadNAVHistoryReport_Po.aspx'
 AMFI_HISTORY_URL = 'https://www.amfiindia.com/api/nav-history'
-AMFI_TER_URL = 'https://www.amfiindia.com/api/populate-ter-rdata-revised'
+AMFI_TER_URL = 'https://www.amfiindia.com/api/populate-te-rdata-revised'
+AMFI_TER_PAGE_URL = 'https://www.amfiindia.com/ter-of-mf-schemes'
 AMFI_AUM_URL = 'https://portal.amfiindia.com/AUMReport_Rpt_Po.aspx'
 MFAPI_URL = 'https://api.mfapi.in/mf'
 HEADERS = {'User-Agent': 'MNS-Fund-Analyzer/1.0', 'Accept': '*/*'}
 CONNECT_TIMEOUT_SECONDS = 2
 READ_TIMEOUT_SECONDS = 8
 MAX_PROVIDER_ATTEMPTS = 2
-MAX_TER_PAGES = 8
+AUM_LOOKBACK_QUARTERS = 2
+TER_LOOKBACK_MONTHS = 3
+TER_THROTTLE_RETRY_SECONDS = 3
+TER_COLUMNS = ('nsdl scheme code', 'scheme name', 'ter date', 'regular plan - total ter (%)', 'direct plan - total ter (%)')
 MAX_CONCURRENT_PROVIDER_REQUESTS = 4
 _provider_request_slots = BoundedSemaphore(MAX_CONCURRENT_PROVIDER_REQUESTS)
 
@@ -275,78 +281,231 @@ def parse_mfapi(payload: dict[str, Any], scheme_code: str) -> tuple[dict[str, An
     return info, sorted(rows, key=lambda row: row['date'])
 
 
-def fetch_amfi_ter_snapshot(scheme_codes: list[str] | None = None) -> dict[str, tuple[float | None, str | None]]:
-    """Fetch the current AMFI TER table once, keyed by scheme code."""
-    requested = {str(code) for code in scheme_codes or []}
+def _ter_amc_ids() -> dict[str, str]:
+    """AMFI publishes its MF_ID list only inside the official TER page's data. The AUM report uses the same ids."""
+    def load() -> dict[str, str]:
+        page = fetch_url(AMFI_TER_PAGE_URL, timeout=(2, 15), attempts=1).text
+        ids = {name: mf_id for mf_id, name in re.findall(r'\\"mfId\\":\\"(\d+)\\",\\"mfName\\":\\"([^"\\]+)\\"', page)}
+        if not ids:
+            raise ProviderError('AMFI TER page did not list any mutual funds')
+        return ids
 
-    def load() -> dict[str, tuple[float | None, str | None]]:
+    return _cached_provider_value('fund-analyzer:amfi:ter-amc-ids', load, ttl=604800, stale_ttl=2592000)
+
+
+def _ter_months() -> list[str]:
+    """Newest first, in AMFI's MM-YYYY format; AMCs publish a new month at different times."""
+    cursor = date.today().replace(day=1)
+    months = []
+    for _ in range(TER_LOOKBACK_MONTHS):
+        months.append(cursor.strftime('%m-%Y'))
+        cursor = (cursor - timedelta(days=1)).replace(day=1)
+    return months
+
+
+def _ter_name_key(name: Any) -> str:
+    return re.sub(r'\s+', ' ', str(name or '')).strip().casefold()
+
+
+def _ter_percent(value: Any) -> float | None:
+    """Return the disclosed total. A blank or zero total means no disclosure, not a free fund."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _ter_date(value: Any) -> str | None:
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    try:
+        return date.fromisoformat(str(value or '')[:10]).isoformat()
+    except ValueError:
+        return None
+
+
+def _parse_ter_workbook(payload: bytes) -> dict[str, dict[str, tuple[str, float | None, float | None]]]:
+    """Read AMFI's TER download into {scheme name: {NSDL code: (date, regular, direct)}}.
+
+    The workbook has one row per scheme per day, and its Total TER columns already
+    include BER, brokerage, transaction cost and statutory levies.
+    """
+    from openpyxl import load_workbook
+
+    try:
+        workbook = load_workbook(BytesIO(payload), read_only=True, data_only=True)
+        rows = list(workbook.worksheets[0].values)
+        workbook.close()
+    except Exception as exc:
+        raise ProviderError('AMFI TER workbook could not be read') from exc
+    if len(rows) < 2:
+        return {}
+    headers = {str(value or '').strip().lower(): index for index, value in enumerate(rows[0])}
+    try:
+        code_at, name_at, date_at, regular_at, direct_at = (headers[column] for column in TER_COLUMNS)
+    except KeyError as exc:
+        raise ProviderError('AMFI TER workbook columns were not recognised') from exc
+
+    table: dict[str, dict[str, tuple[str, float | None, float | None]]] = {}
+    for raw_row in rows[1:]:
+        # Read-only workbooks drop trailing blank cells, so a short row can still be a real row.
+        row = [*raw_row, *([None] * (len(rows[0]) - len(raw_row)))]
+        reporting_date = _ter_date(row[date_at])
+        # AMFI's footnote rows have no scheme code or date.
+        if not reporting_date or not row[code_at]:
+            continue
+        schemes = table.setdefault(_ter_name_key(row[name_at]), {})
+        code = str(row[code_at])
+        if code not in schemes or reporting_date >= schemes[code][0]:
+            schemes[code] = (reporting_date, _ter_percent(row[regular_at]), _ter_percent(row[direct_at]))
+    return table
+
+
+def _fetch_ter_table(mf_id: str, month: str) -> dict[str, dict[str, tuple[str, float | None, float | None]]]:
+    def load() -> dict[str, dict[str, tuple[str, float | None, float | None]]]:
+        # The JSON form caps pageSize at 100 and paging it gets a 429; the official
+        # Excel download returns the whole AMC month in one request.
+        params = {'MF_ID': mf_id, 'Month': month, 'strCat': '-1', 'strType': '-1', 'excel': 'true'}
         try:
-            today = date.today()
-            financial_year = today.year if today.month >= 4 else today.year - 1
-            year = f'{financial_year}-{financial_year + 1}'
-            months = fetch_url('https://www.amfiindia.com/api/populate-ter-month', params={'year': year}, timeout=(1, 3), attempts=1).json()
-            month_rows = months[0].get('data', []) if isinstance(months, list) and months else []
-            if not month_rows:
-                return {}
-            month = month_rows[0].get('MonthNumber')
-            result: dict[str, tuple[float | None, str | None]] = {}
-            pages_remaining = MAX_TER_PAGES
-            for fund_type in ('-1', '1', '2', '3'):
-                if pages_remaining <= 0:
-                    break
-                first = fetch_url(AMFI_TER_URL, params={'MF_ID': 'All', 'Month': month, 'strCat': '-1', 'strType': fund_type, 'page': 1, 'pageSize': 500}, timeout=(1, 3), attempts=1).json()
-                meta = first.get('meta') or {}
-                pages = int(meta.get('pageCount') or 1)
-                for page in range(1, min(pages, pages_remaining) + 1):
-                    payload = first if page == 1 else fetch_url(AMFI_TER_URL, params={'MF_ID': 'All', 'Month': month, 'strCat': '-1', 'strType': fund_type, 'page': page, 'pageSize': 500}, timeout=(1, 3), attempts=1).json()
-                    pages_remaining -= 1
-                    rows = payload.get('data') if isinstance(payload, dict) else []
-                    for row in rows if isinstance(rows, list) else []:
-                        code = str(row.get('NSDLSchemeCode') or row.get('SchemeCode') or '')
-                        value = row.get('D_TER') or row.get('D_TER_Total')
-                        result[code] = ((float(value) if value not in (None, '') else None), row.get('TER_Date'))
-                    if requested and requested.issubset(result):
-                        return result
-                if result and (not requested or requested.issubset(result)):
-                    return result
-            return result
-        except ProviderError:
-            raise
-        except (ValueError, TypeError, AttributeError, KeyError):
-            return {}
+            response = fetch_url(AMFI_TER_URL, params=params, timeout=(2, 20), attempts=1)
+        except ProviderError as exc:
+            if '429' not in str(exc):
+                raise
+            sleep(TER_THROTTLE_RETRY_SECONDS)
+            response = fetch_url(AMFI_TER_URL, params=params, timeout=(2, 20), attempts=1)
+        return _parse_ter_workbook(response.content)
 
-    today = date.today()
-    financial_year = today.year if today.month >= 4 else today.year - 1
-    year = f'{financial_year}-{financial_year + 1}'
-    requested_key = ','.join(sorted(requested)) if requested else 'all'
-    return _cached_provider_value(f'fund-analyzer:amfi:ter:{year}:{requested_key}', load, ttl=86400, stale_ttl=604800)
+    return _cached_provider_value(f'fund-analyzer:amfi:ter:{mf_id}:{month}', load, ttl=21600, stale_ttl=604800)
+
+
+def _ter_plan(record: dict[str, Any]) -> str | None:
+    text = str(record.get('plan') or record.get('scheme_name') or '').lower()
+    if 'direct' in text:
+        return 'direct'
+    return 'regular' if 'regular' in text else None
+
+
+def _ter_for_record(record: dict[str, Any] | None) -> tuple[float | None, str | None]:
+    """Latest official Total TER for this scheme and plan, or (None, None) if unsure."""
+    plan = _ter_plan(record) if record else None
+    if not plan:
+        return None, None
+    try:
+        mf_id = _ter_amc_ids().get(record.get('amc') or '')
+        if not mf_id:
+            return None, None
+        for month in _ter_months():
+            schemes = _fetch_ter_table(mf_id, month).get(_ter_name_key(record.get('scheme_name')))
+            if not schemes:
+                continue
+            latest = max(row[0] for row in schemes.values())
+            current = [row for row in schemes.values() if row[0] == latest]
+            if len(current) > 1:
+                logger.warning('AMFI TER has %d schemes named %s; not guessing', len(current), record.get('scheme_name'))
+                return None, None
+            reporting_date, regular, direct = current[0]
+            value = direct if plan == 'direct' else regular
+            return (value, reporting_date) if value is not None else (None, None)
+    except ProviderError as exc:
+        logger.warning('AMFI TER unavailable for scheme %s: %s', record.get('scheme_code'), exc)
+    return None, None
+
+
+def fetch_amfi_ter_snapshot(scheme_codes: list[str], latest_records: list[dict[str, Any]] | None = None) -> dict[str, tuple[float | None, str | None]]:
+    """Return {scheme code: (TER %, reporting date)} for the requested schemes."""
+    records = latest_records if latest_records is not None else fetch_amfi_latest()
+    record_by_code = {str(record.get('scheme_code')): record for record in records}
+    codes = [str(code) for code in scheme_codes]
+    if not codes:
+        return {}
+    try:
+        _ter_amc_ids()
+    except ProviderError as exc:
+        logger.warning('AMFI TER mutual fund list unavailable: %s', exc)
+        return {code: (None, None) for code in codes}
+    # Funds of one AMC share a workbook, so load them in turn: the first fills the
+    # cache for the rest. AMFI answers parallel requests for the same file with a 429.
+    codes_by_amc: dict[Any, list[str]] = {}
+    for code in codes:
+        codes_by_amc.setdefault((record_by_code.get(code) or {}).get('amc'), []).append(code)
+
+    def load_amc(amc_codes: list[str]) -> dict[str, tuple[float | None, str | None]]:
+        return {code: _ter_for_record(record_by_code.get(code)) for code in amc_codes}
+
+    result: dict[str, tuple[float | None, str | None]] = {}
+    with ThreadPoolExecutor(max_workers=min(2, len(codes_by_amc))) as pool:
+        for values in pool.map(load_amc, codes_by_amc.values()):
+            result.update(values)
+    return result
 
 
 def fetch_amfi_ter(scheme_code: str, latest_records: list[dict[str, Any]], ter_snapshot: dict[str, tuple[float | None, str | None]] | None = None) -> tuple[float | None, str | None]:
     """Fetch current TER for one scheme, returning null when AMFI has no match."""
-    snapshot = ter_snapshot if ter_snapshot is not None else fetch_amfi_ter_snapshot()
+    snapshot = ter_snapshot if ter_snapshot is not None else fetch_amfi_ter_snapshot([scheme_code], latest_records)
     return snapshot.get(str(scheme_code), (None, None))
 
 
-def fetch_amfi_aum(scheme_name: str) -> tuple[float | None, str | None]:
-    """Read the current scheme-wise AAUM report; values are in lakhs."""
-    try:
-        today = date.today()
-        quarter_start_month = ((today.month - 1) // 3) * 3 + 1
-        if quarter_start_month == 1:
-            report_date = date(today.year - 1, 10, 1)
-        else:
-            report_date = date(today.year, quarter_start_month - 3, 1)
-        quarter_end_month = report_date.month + 2
-        quarter = f'{report_date.strftime("%B")} - {date(report_date.year, quarter_end_month, 1).strftime("%B")} {report_date.year}'
-        def load_report() -> str:
-            response = fetch_url(AMFI_AUM_URL, params={'dtAUM': report_date.strftime('%d-%b-%Y'), 'mf': 0, 'qt': quarter, 'rpt': 'scwise'})
-            return response.text
+def _aum_quarters() -> list[tuple[date, date]]:
+    """Completed quarters as (first day, last day), newest first."""
+    today = date.today()
+    cursor = date(today.year, ((today.month - 1) // 3) * 3 + 1, 1)
+    quarters = []
+    for _ in range(AUM_LOOKBACK_QUARTERS):
+        last_day = cursor - timedelta(days=1)
+        first_day = date(last_day.year, last_day.month - 2, 1)
+        quarters.append((first_day, last_day))
+        cursor = first_day
+    return quarters
 
-        text = _cached_provider_value(f'fund-analyzer:amfi:aum:{quarter}', load_report, ttl=86400, stale_ttl=604800)
-        match = re.search(re.escape(scheme_name) + r'.{0,500}?([\d,]+\.\d+)\s+([\d,]+\.\d+)', text, re.I | re.S)
-        if not match:
+
+def _parse_aum_report(text: str, amc_name: str) -> list[tuple[str, float]]:
+    """Read (plan name, AAUM in lakhs) rows, only if the report is for this AMC."""
+    rows = [
+        [re.sub(r'\s+', ' ', unescape(re.sub(r'<[^>]+>', '', cell))).strip() for cell in re.findall(r'<t[dh][^>]*>(.*?)</t[dh]>', row, re.S | re.I)]
+        for row in re.findall(r'<tr[^>]*>(.*?)</tr>', text, re.S | re.I)
+    ]
+    if not any(len(row) == 1 and row[0].casefold() == amc_name.casefold() for row in rows):
+        return []
+    plans = []
+    for row in rows:
+        if len(row) != 3:
+            continue
+        try:
+            # The two columns are "excluding FoF - Domestic" and "FoF - Domestic".
+            plans.append((row[0], float(row[1].replace(',', '')) + float(row[2].replace(',', ''))))
+        except ValueError:
+            continue
+    return plans
+
+
+def _scheme_aum(plans: list[tuple[str, float]], scheme_name: str) -> float | None:
+    """Add up one scheme's plans. The report has a row per plan and option."""
+    wanted = _ter_name_key(scheme_name)
+    if not wanted:
+        return None
+    # After the scheme name comes the plan, written as "- Direct", "(Direct)" or "Direct".
+    pattern = re.compile(re.escape(wanted) + r'\s*(?:-|\(|(?:direct|regular|growth|idcw|dividend)\b)')
+    total = sum(value for name, value in plans if _ter_name_key(name) == wanted or pattern.match(_ter_name_key(name)))
+    return total if total > 0 else None
+
+
+def fetch_amfi_aum(scheme_name: str, amc_name: str) -> tuple[float | None, str | None]:
+    """Latest quarterly AAUM for the whole scheme, in lakhs, with its quarter end date."""
+    try:
+        mf_id = _ter_amc_ids().get(amc_name)
+        if not mf_id:
             return None, None
-        return float(match.group(1).replace(',', '')), report_date.isoformat()
-    except (ProviderError, ValueError, TypeError):
-        return None, None
+        for first_day, last_day in _aum_quarters():
+            def load_report() -> list[tuple[str, float]]:
+                # mf=0 is a 6 MB report that takes 20s or more; one AMC takes about 2s.
+                params = {'dtAUM': first_day.strftime('%d-%b-%Y'), 'mf': mf_id, 'qt': f'{first_day.strftime("%B")} - {last_day.strftime("%B")} {first_day.year}', 'rpt': 'scwise'}
+                return _parse_aum_report(fetch_url(AMFI_AUM_URL, params=params, timeout=(3, 15), attempts=1).text, amc_name)
+
+            plans = _cached_provider_value(f'fund-analyzer:amfi:aum:{mf_id}:{last_day.isoformat()}', load_report, ttl=86400, stale_ttl=2592000)
+            if plans:
+                total = _scheme_aum(plans, scheme_name)
+                return (total, last_day.isoformat()) if total is not None else (None, None)
+    except ProviderError as exc:
+        logger.warning('AMFI AUM unavailable for %s: %s', scheme_name, exc)
+    return None, None
