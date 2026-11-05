@@ -25,7 +25,7 @@ export default function SummaryCards({ funds, overlap, overlapLoading }) {
   const overlapCaption = overlapLoading
     ? 'Loading monthly holdings...'
     : highest?.available
-      ? <><i style={{ background: leftFund?.color }} /><i style={{ background: rightFund?.color }} /><span className="fa-stat__overlap-detail"><span>{highest.fund_a_name} ↔ {highest.fund_b_name}</span>{portfolioLabel && <small>Portfolio as of {portfolioLabel}</small>}{highest.partial_coverage && <small>Partial coverage: {highest.compared_pairs}/{highest.total_pairs} pairs</small>}{highest.pairs_different_months && <small>Pairs use different reporting months</small>}</span></>
+      ? <><i style={{ background: leftFund?.color }} /><i style={{ background: rightFund?.color }} /><span className="fa-stat__overlap-detail"><span>{highest.fund_a_name} ↔ {highest.fund_b_name}</span>{portfolioLabel && <small>Portfolio as of {portfolioLabel}</small>}{highest.partial_coverage && <small>Partial coverage: {highest.compared_pairs}/{highest.total_pairs} pairs</small>}{highest.pairs_different_months && <small>Pairs use different reporting months</small>}{highest.message && <small>{highest.message}</small>}</span></>
       : highest?.message || 'Portfolio holdings unavailable';
   return <section className="fa-stats">
     <Card dark icon={TrendingUp} label="TOP 3Y CAGR" value={signedPct(topCagr?.metrics?.r3y)} caption={topCagr?.scheme_name || 'Not enough history'} />

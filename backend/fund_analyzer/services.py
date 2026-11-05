@@ -172,6 +172,7 @@ def fetch_fundamentals(scheme_codes: list[str]) -> dict[str, Any]:
         return result
 
     record_by_code = {str(record.get('scheme_code')): record for record in latest_records}
+
     with ThreadPoolExecutor(max_workers=2 + min(4, len(scheme_codes))) as pool:
         ter_future = pool.submit(fetch_amfi_ter_snapshot, scheme_codes, latest_records)
         aum_future = pool.submit(load_aum_values)
@@ -192,7 +193,7 @@ def fetch_fundamentals(scheme_codes: list[str]) -> dict[str, Any]:
                 holdings_by_code[code] = future.result()
             except Exception:
                 logger.exception('Fund Analyzer holdings lookup failed for %s', code)
-                holdings_by_code[code] = {'holdings': [], 'holdings_as_of': None, 'benchmark': None, 'allocation': None, 'sectors': [], 'riskometer': None}
+                holdings_by_code[code] = {'holdings': [], 'holdings_as_of': None, 'benchmark': None, 'allocation': None, 'sectors': [], 'riskometer': None, 'asset_class': None}
 
     funds = []
     for code in scheme_codes:

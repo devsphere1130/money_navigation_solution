@@ -8,66 +8,77 @@ from html.parser import HTMLParser
 from io import BytesIO
 from threading import Lock
 from typing import Any
-from urllib.parse import quote, unquote, urljoin, urlsplit
+import zipfile
+from urllib.parse import urljoin, urlsplit
 
 import pandas as pd
 import requests
+from django.conf import settings
 from django.core.cache import cache
 
+from .adapters import (
+    AMC_SOURCES,
+    DISCLOSURE_NOT_PUBLISHED,
+    DOWNLOAD_BLOCKED,
+    DOWNLOAD_FAILED,
+    HOLDINGS_AVAILABLE,
+    INVALID_WORKBOOK,
+    NO_COMMON_MONTH,
+    PARSING_FAILED,
+    SCHEME_NOT_FOUND,
+    SOURCE_NOT_SUPPORTED,
+    PortfolioError,
+    adapter_for,
+    candidate_link as _candidate_link,
+    classify_error,
+    is_official_url,
+    month_in_text as _month_in_text,
+    normalise_name as _normalise_name,
+    official_domains,
+    portfolio_date as _portfolio_date,
+    source_for_amc,
+)
+from .portfolio_store import ASSET_DEBT, ASSET_EQUITY, ASSET_HYBRID, ISIN_PATTERN, MAX_DEBT_WEIGHT, SOURCE_IMPORT, discovery_due, file_scheme_name, load_snapshot, record_status, source_status, store_snapshot, stored_links
 from .providers import HEADERS, ProviderError, fetch_amfi_latest, fetch_url
 from .riskometer import read_scheme_riskometer
 
 logger = logging.getLogger(__name__)
 
-# The keys must exactly match the AMC names in AMFI NAVAll.txt. These are
-# official AMC disclosure pages; each parser key handles that page's file list.
-AMC_SOURCES = {
-    'HDFC Mutual Fund': {
-        'key': 'hdfc',
-        'url': 'https://www.hdfcfund.com/statutory-disclosure/portfolio/monthly-portfolio',
-        'parser': 'hdfc_xlsx_by_scheme',
-    },
-    'PPFAS Mutual Fund': {
-        'key': 'ppfas',
-        'url': 'https://amc.ppfas.com/downloads/portfolio-disclosure/',
-        'parser': 'ppfas_consolidated_excel',
-    },
-    'Nippon India Mutual Fund': {
-        'key': 'nippon',
-        'url': 'https://mf.nipponindiaim.com/investor-service/downloads/factsheet-portfolio-and-other-disclosures/',
-        'parser': 'nippon_monthly_excel',
-    },
-    'SBI Mutual Fund': {
-        'key': 'sbi',
-        'url': 'https://www.sbimf.com/portfolios',
-        'parser': 'sbi_monthly_excel',
-    },
-}
-
 PORTFOLIO_CACHE_SECONDS = 24 * 60 * 60
 PAGE_CACHE_SECONDS = 60 * 60
 PAGE_ERROR_CACHE_SECONDS = 5 * 60
-PORTFOLIO_LOOKBACK_MONTHS = 6
+PORTFOLIO_LOOKBACK_MONTHS = settings.FUND_ANALYZER_PORTFOLIO_LOOKBACK_MONTHS
+MAX_PORTFOLIO_FILE_BYTES = 64 * 1024 * 1024
+MAX_WORKBOOK_UNPACKED_BYTES = 512 * 1024 * 1024
 TOP_SECTORS = 6
+REASON_NO_COMMON_SECURITIES = 'NO_COMMON_SECURITIES'
+REASON_HOLDINGS_UNAVAILABLE = 'HOLDINGS_UNAVAILABLE'
+REASON_PARSER_UNSUPPORTED = 'PARSER_UNSUPPORTED'
+REASON_NO_COMMON_MONTH = 'NO_COMMON_REPORTING_MONTH'
+REASON_MESSAGES = {
+    REASON_NO_COMMON_SECURITIES: 'No common securities',
+    REASON_HOLDINGS_UNAVAILABLE: 'Holdings unavailable',
+    REASON_PARSER_UNSUPPORTED: 'Parser unsupported',
+    REASON_NO_COMMON_MONTH: 'No common reporting month',
+}
+# The kinds of security each fund type is compared on. A pair uses what both share.
+FUND_SECURITY_CLASSES = {
+    ASSET_EQUITY: {ASSET_EQUITY},
+    ASSET_DEBT: {ASSET_DEBT},
+    ASSET_HYBRID: {ASSET_EQUITY, ASSET_DEBT},
+}
+# Above this share of NAV, unclassified rows are reported instead of being ignored.
+MATERIAL_UNCLASSIFIED_WEIGHT = 1
 PARSED_HOLDINGS_CACHE_SECONDS = 180 * 24 * 60 * 60
 PORTFOLIO_CACHE_MAX_BYTES = 128 * 1024 * 1024
 IMPORTED_HOLDINGS_CACHE_SECONDS = 70 * 24 * 60 * 60
 _download_lock = Lock()
 _portfolio_file_cache: dict[tuple[str, str], tuple[datetime, dict[str, bytes]]] = {}
 SBI_PORTFOLIO_LIST_URL = 'https://www.sbimf.com/ajaxcall/CMS/GetSchemePortfolioSheets'
-HDFC_PUBLIC_FILE_ROOT = 'https://files.hdfcfund.com/s3fs-public/'
-# Verified public Excel filename for the AMFI scheme; the workbook's own name
-# and reporting date are still validated before any holdings are used.
-HDFC_PUBLIC_FILE_NAMES = {'hdfc flexi cap fund': 'HDFC Flexi Cap Fund'}
-PPFAS_SCHEME_FILE_PREFIXES = {
-    'parag parikh flexi cap fund': 'PPFCF_',
-    'parag parikh large cap fund': 'PPLCF_',
-    'parag parikh elss tax saver fund': 'PPTSF_',
-    'parag parikh conservative hybrid fund': 'PPCHF_',
-    'parag parikh dynamic asset allocation fund': 'PPDAAF_',
-    'parag parikh arbitrage fund': 'PPAF_',
-    'parag parikh liquid fund': 'PPLF_',
-}
+
+
+class _NoHoldingsFound(ProviderError):
+    """The file was read correctly and holds no rows of this kind."""
 
 
 class _PortfolioLinks(HTMLParser):
@@ -88,32 +99,6 @@ class _PortfolioLinks(HTMLParser):
         if tag.lower() == 'a' and self._current is not None:
             self.links.append(self._current)
             self._current = None
-
-
-def _month_in_text(value: str) -> str | None:
-    text = re.sub(r'[-_./]+', ' ', value)
-    patterns = (
-        '%d %B %Y', '%d %b %Y', '%d %B %y', '%d %b %y',
-        '%B %d %Y', '%b %d %Y', '%B %Y', '%b %Y', '%B %y', '%b %y',
-    )
-    candidates = re.findall(
-        r'(?i)(?:\b\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4}\b|'
-        r'\b[A-Za-z]{3,9}\s+\d{1,2}\s+\d{2,4}\b|'
-        r'\b[A-Za-z]{3,9}\s+\d{2,4}\b)', text,
-    )
-    for candidate in candidates:
-        for pattern in patterns:
-            try:
-                return datetime.strptime(candidate, pattern).strftime('%Y-%m')
-            except ValueError:
-                continue
-    return None
-
-
-def _portfolio_date(month: str) -> str:
-    first = date.fromisoformat(f'{month}-01')
-    next_month = (first.replace(day=28) + timedelta(days=4)).replace(day=1)
-    return (next_month - timedelta(days=1)).isoformat()
 
 
 def _recent_portfolio_months() -> set[str]:
@@ -145,12 +130,12 @@ def _parsed_links(scheme_code: str) -> list[dict[str, str]]:
     return cache.get(_parsed_index_key(scheme_code)) or []
 
 
-def _cache_parsed_holdings(scheme_code: str, reporting_date: str, holdings: dict[str, float], url: str, names: dict[str, str] | None = None, industries: dict[str, str] | None = None, benchmark: str | None = None, risk_level: str | None = None) -> None:
+def _cache_parsed_holdings(scheme_code: str, reporting_date: str, holdings: dict[str, float], url: str, names: dict[str, str] | None = None, industries: dict[str, str] | None = None, benchmark: str | None = None, risk_level: str | None = None, instrument_types: dict[str, str] | None = None, issuers: dict[str, str] | None = None, other_holdings: list[dict[str, Any]] | None = None, extras: dict[str, Any] | None = None) -> None:
     month = reporting_date[:7]
     cache_key = f'fund-analyzer:portfolio-parsed:{scheme_code}:{month}'
     link = {'url': url, 'cache_key': cache_key, 'month': month, 'portfolio_date': reporting_date, 'cached': True}
     try:
-        cache.set(cache_key, {'holdings': holdings, 'names': names or {}, 'industries': industries or {}, 'benchmark': benchmark, 'risk_level': risk_level, 'portfolio_date': reporting_date}, timeout=PARSED_HOLDINGS_CACHE_SECONDS)
+        cache.set(cache_key, {'holdings': holdings, 'names': names or {}, 'industries': industries or {}, 'benchmark': benchmark, 'risk_level': risk_level, 'instrument_types': instrument_types or {}, 'issuers': issuers or {}, 'other_holdings': other_holdings or [], 'portfolio_date': reporting_date, **(extras or {})}, timeout=PARSED_HOLDINGS_CACHE_SECONDS)
         existing = cache.get(_parsed_index_key(scheme_code)) or []
         links = [link, *(item for item in existing if item.get('month') != month)]
         links.sort(key=lambda item: item['month'], reverse=True)
@@ -159,14 +144,13 @@ def _cache_parsed_holdings(scheme_code: str, reporting_date: str, holdings: dict
         logger.exception('Parsed portfolio cache write failed for scheme %s', scheme_code)
 
 
-def _normalise_name(value: str) -> str:
-    text = re.sub(r'\b(direct|regular|growth|option|plan|idcw|reinvestment|reinvest|dividend)\b', ' ', value, flags=re.I)
-    return re.sub(r'[^a-z0-9]+', ' ', text.lower()).strip()
-
-
 def _is_debt_fund(record: dict) -> bool:
     category = re.sub(r'\s+', ' ', str(record.get('category') or '')).strip().lower()
-    return category.startswith('debt scheme') or category.startswith('debt fund')
+    return category.startswith(('debt scheme', 'debt fund', 'income/debt'))
+
+
+def _is_hybrid_fund(record: dict) -> bool:
+    return re.sub(r'\s+', ' ', str(record.get('category') or '')).strip().lower().startswith('hybrid')
 
 
 def _overlap_debug_record(code: str, record: dict | None = None, *, error: str | None = None) -> dict[str, Any]:
@@ -189,30 +173,6 @@ def _overlap_debug_record(code: str, record: dict | None = None, *, error: str |
         'errors_by_month': {},
         'error': error,
     }
-
-
-def _scheme_link_matches(text: str, fund_name: str) -> bool:
-    wanted = _normalise_name(fund_name)
-    candidate = _normalise_name(unquote(text))
-    return bool(wanted and (wanted in candidate or candidate in wanted))
-
-
-def _candidate_link(parser_key: str, text: str, href: str) -> bool:
-    combined = f'{text} {href}'.lower()
-    path = urlsplit(href).path.lower()
-    if not path.endswith(('.xls', '.xlsx')):
-        return False
-    if 'fortnight' in combined or 'half-year' in combined or 'half yearly' in combined:
-        return False
-    if parser_key == 'hdfc_xlsx_by_scheme':
-        return 'monthly' in combined
-    if parser_key == 'ppfas_consolidated_excel':
-        return 'consolidated' in combined or 'ppfas_monthly_portfolio_report' in combined
-    if parser_key == 'nippon_monthly_excel':
-        return 'monthly portfolio' in combined or 'monthly-portfolio' in combined
-    if parser_key == 'sbi_monthly_excel':
-        return 'monthly portfolio' in combined or 'monthly-portfolio' in combined
-    return False
 
 
 def _sbi_monthly_links() -> list[dict[str, str]]:
@@ -293,17 +253,21 @@ def _load_page_links(amc_key: str, page_url: str, parser_key: str) -> list[dict[
         if parser_key == 'sbi_monthly_excel':
             results = _sbi_monthly_links()
         else:
-            response = fetch_url(page_url, timeout=(2, 8), attempts=1)
+            response = fetch_url(page_url, timeout=(3, 15), attempts=1)
             parser = _PortfolioLinks()
             parser.feed(response.text)
             results = []
+            domains = official_domains(amc_key)
+            seen_urls = set()
             for link in parser.links:
-                href = urljoin(page_url, link['href'].strip())
+                href = urljoin(page_url, (link['href'] or '').strip())
                 text = re.sub(r'\s+', ' ', link['text']).strip()
-                if not _candidate_link(parser_key, text, href):
+                # Pages can repeat one file for its download and share buttons.
+                if href in seen_urls or not _candidate_link(parser_key, text, href) or not is_official_url(href, domains):
                     continue
                 month = _month_in_text(f'{text} {href}')
                 if month:
+                    seen_urls.add(href)
                     results.append({'url': href, 'text': text, 'month': month, 'portfolio_date': _portfolio_date(month)})
         if not results:
             raise ProviderError(f'No monthly portfolio files found for {amc_key}')
@@ -327,37 +291,54 @@ def _load_page_links(amc_key: str, page_url: str, parser_key: str) -> list[dict[
 
 
 def _monthly_files_for_fund(source: dict, fund_name: str) -> list[dict[str, str]]:
+    adapter = adapter_for(source)
     try:
         links = _load_page_links(source['key'], source['url'], source['parser'])
     except ProviderError as exc:
-        public_name = HDFC_PUBLIC_FILE_NAMES.get(_normalise_name(fund_name))
-        if source['parser'] != 'hdfc_xlsx_by_scheme' or not public_name:
-            raise
-        # The HDFC listing can reject server requests while its separate public
-        # file host permits ordinary GETs. No cookies or access workarounds.
-        links = []
-        for month in sorted(_recent_portfolio_months(), reverse=True):
-            reporting_date = date.fromisoformat(_portfolio_date(month))
-            folder = (reporting_date + timedelta(days=1)).strftime('%Y-%m')
-            filename = f"Monthly {public_name} - {reporting_date.day} {reporting_date.strftime('%B %Y')}.xlsx"
-            links.append({
-                'url': urljoin(HDFC_PUBLIC_FILE_ROOT, f'{folder}/{quote(filename)}'),
-                'text': filename, 'month': month, 'listing_error': str(exc),
-            })
-        logger.warning('HDFC listing failed; checking its public Excel file host: %s', exc)
+        links = adapter.fallback_links(fund_name, list(_recent_portfolio_months()), exc)
+        logger.warning('Listing failed for %s; trying its published file pattern: %s', source['key'], exc)
         return links
-    if source['parser'] == 'ppfas_consolidated_excel':
-        prefix = PPFAS_SCHEME_FILE_PREFIXES.get(_normalise_name(fund_name))
-        if prefix:
-            scheme_links = [link for link in links if urlsplit(link['url']).path.rsplit('/', 1)[-1].upper().startswith(prefix)]
-            if scheme_links:
-                return scheme_links
-        return [link for link in links if link['text'].lower() == 'consolidated']
-    if source['parser'] in ('hdfc_xlsx_by_scheme', 'sbi_monthly_excel'):
-        links = [link for link in links if _scheme_link_matches(f"{link['text']} {urlsplit(link['url']).path}", fund_name)]
-        if source['parser'] == 'sbi_monthly_excel' and not links:
-            links = [link for link in _load_page_links(source['key'], source['url'], source['parser']) if 'all schemes' in link['text'].lower()]
-    return links
+    return adapter.select_links(links, fund_name)
+
+
+def _check_workbook_payload(payload: bytes) -> None:
+    """Accept only real Excel files, and refuse any that would unpack to something huge."""
+    if payload[:8] == b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1':
+        return
+    if payload[:4] != b'PK\x03\x04':
+        raise PortfolioError(INVALID_WORKBOOK, 'Monthly portfolio file is not an Excel workbook')
+    try:
+        with zipfile.ZipFile(BytesIO(payload)) as archive:
+            unpacked = sum(item.file_size for item in archive.infolist())
+    except zipfile.BadZipFile as exc:
+        raise PortfolioError(INVALID_WORKBOOK, 'Monthly portfolio file is a damaged Excel workbook') from exc
+    if unpacked > MAX_WORKBOOK_UNPACKED_BYTES:
+        raise PortfolioError(INVALID_WORKBOOK, 'Monthly portfolio workbook is too large to read')
+
+
+def _download_portfolio_file(amc_key: str, url: str) -> bytes:
+    """Download a file found by an adapter, staying on the AMC's domain and within size limits."""
+    domains = official_domains(amc_key)
+    if not is_official_url(url, domains):
+        raise PortfolioError(SOURCE_NOT_SUPPORTED, f'File is not on an official domain of {amc_key}')
+    try:
+        with requests.get(url, headers=HEADERS, timeout=(3, 30), stream=True) as response:
+            if not is_official_url(response.url, domains):
+                raise PortfolioError(DOWNLOAD_BLOCKED, f'File redirected away from an official domain of {amc_key}')
+            response.raise_for_status()
+            chunks, size = [], 0
+            for chunk in response.iter_content(chunk_size=256 * 1024):
+                size += len(chunk)
+                if size > MAX_PORTFOLIO_FILE_BYTES:
+                    raise PortfolioError(INVALID_WORKBOOK, 'Monthly portfolio file is larger than the allowed size')
+                chunks.append(chunk)
+    except requests.RequestException as exc:
+        raise ProviderError(str(exc)) from exc
+    payload = b''.join(chunks)
+    if not payload:
+        raise ProviderError(f'Empty monthly portfolio file from {amc_key}')
+    _check_workbook_payload(payload)
+    return payload
 
 
 def _download_cached(amc_key: str, month: str, url: str) -> bytes:
@@ -369,10 +350,7 @@ def _download_cached(amc_key: str, month: str, url: str) -> bytes:
             return cached_entry[1][url]
         cached_files = cached_entry[1] if cached_entry and cached_entry[0] > now else {}
 
-        response = fetch_url(url, timeout=(3, 20), attempts=1)
-        payload = response.content
-        if not payload:
-            raise ProviderError(f'Empty monthly portfolio file from {amc_key}')
+        payload = _download_portfolio_file(amc_key, url)
         cached_files[url] = payload
         _portfolio_file_cache[key] = (now + timedelta(seconds=PORTFOLIO_CACHE_SECONDS), cached_files)
         # Bound memory use if a long-lived worker sees many AMC/month pairs.
@@ -396,6 +374,10 @@ def _sheet_name_score(sheet_name: str, frame: pd.DataFrame, fund_name: str) -> i
     sheet_title = _normalise_name(sheet_name)
     if wanted and wanted in sheet_title:
         return 3
+    # A sheet's title beats a mention lower down, such as one fund holding units of another.
+    title = _normalise_name(' '.join(frame.iloc[:3, :12].fillna('').astype(str).to_numpy().ravel()))
+    if wanted and wanted in title:
+        return 2.5
     context = frame.iloc[:25, :12].fillna('').astype(str).to_numpy().ravel()
     candidate = _normalise_name(' '.join([sheet_name, *context]))
     if wanted and wanted in candidate:
@@ -420,7 +402,7 @@ def _reporting_date_from_frame(frame: pd.DataFrame) -> str | None:
                 return value.date().isoformat() if isinstance(value, datetime) else value.isoformat()
         for candidate in re.findall(
             r'(?i)\b(?:\d{1,2}[\s/-]+[A-Za-z]{3,9}[\s/-]+\d{2,4}|'
-            r'[A-Za-z]{3,9}[\s/-]+\d{1,2},?[\s/-]+\d{2,4}|\d{4}-\d{2}-\d{2})\b',
+            r'[A-Za-z]{3,9}[\s/-]+\d{1,2},?[\s/-]*\d{2,4}|\d{4}-\d{2}-\d{2})\b',
             context,
         ):
             cleaned = re.sub(r'[,/-]', ' ', candidate).strip()
@@ -515,6 +497,7 @@ def _workbook_sheets(payload: bytes, suffix: str) -> tuple[dict[str, pd.DataFram
             except UnicodeDecodeError:
                 continue
         raise ProviderError('Portfolio CSV encoding was not recognised')
+    _check_workbook_payload(payload)
     # Some AMCs publish an OOXML workbook with a legacy .xls filename.
     if suffix.endswith('.xls') and not payload.startswith(b'PK\x03\x04'):
         import xlrd
@@ -547,14 +530,14 @@ def _workbook_sheets(payload: bytes, suffix: str) -> tuple[dict[str, pd.DataFram
     return frames, formats
 
 
-def _read_equity_holdings(
+def _locate_holdings_table(
     payload: bytes,
     url: str,
     fund_name: str,
-    parser_key: str,
-    diagnostics: dict[str, Any] | None = None,
-    workbook: tuple[dict[str, pd.DataFrame], dict[str, list[list[str]]]] | None = None,
-) -> dict[str, float]:
+    diagnostics: dict[str, Any] | None,
+    workbook: tuple[dict[str, pd.DataFrame], dict[str, list[list[str]]]] | None,
+) -> dict[str, Any]:
+    """Find this scheme's sheet, its holdings table and how weights are given."""
     suffix = urlsplit(url).path.lower()
     try:
         sheets, formats_by_sheet = workbook if workbook is not None else _workbook_sheets(payload, suffix)
@@ -565,12 +548,9 @@ def _read_equity_holdings(
 
     ranked = sorted((( _sheet_name_score(name, frame, fund_name), name, frame) for name, frame in sheets.items()), key=lambda row: row[0], reverse=True)
     if not ranked or ranked[0][0] == 0:
-        if parser_key == 'hdfc_xlsx_by_scheme' and len(ranked) == 1:
-            _, sheet_name, frame = ranked[0]
-        else:
-            raise ProviderError(f'No sheet matched fund {fund_name}')
-    else:
-        _, sheet_name, frame = ranked[0]
+        # A file name proves nothing. The workbook itself must name this scheme.
+        raise ProviderError(f'No sheet matched fund {fund_name}')
+    _, sheet_name, frame = ranked[0]
     if diagnostics is not None:
         diagnostics['matched_sheet_name'] = sheet_name
         diagnostics['reporting_date'] = _reporting_date_from_frame(frame)
@@ -597,7 +577,7 @@ def _read_equity_holdings(
             named_headers.append(header)
     if named_headers:
         header_at, isin_at, weight_at, asset_at, market_value_at = named_headers[-1]
-    elif len(header_candidates) == 1 and (_sheet_name_score(sheet_name, frame, fund_name) > 0 or parser_key == 'hdfc_xlsx_by_scheme'):
+    elif len(header_candidates) == 1 and _sheet_name_score(sheet_name, frame, fund_name) > 0:
         header_at, isin_at, weight_at, asset_at, market_value_at = header_candidates[0]
     else:
         raise ProviderError(f'No holdings section matched fund {fund_name}')
@@ -619,6 +599,51 @@ def _read_equity_holdings(
                 continue
         if total_fund_value is None:
             raise ProviderError(f'Total fund value was not found for {fund_name}')
+    return {
+        'sheet_name': sheet_name, 'frame': frame, 'cell_formats': formats_by_sheet.get(sheet_name, []),
+        'header_at': header_at, 'isin_at': isin_at, 'weight_at': weight_at, 'asset_at': asset_at,
+        'market_value_at': market_value_at, 'section_end': section_end, 'total_fund_value': total_fund_value,
+    }
+
+
+def _row_weight(table: dict[str, Any], row: list, row_index: int) -> float | None:
+    """A holding's weight as a percentage of the whole scheme, not of one asset class."""
+    weight_at, market_value_at = table['weight_at'], table['market_value_at']
+    if weight_at is not None:
+        cell_formats = table['cell_formats']
+        weight_format = cell_formats[row_index][weight_at] if row_index < len(cell_formats) and weight_at < len(cell_formats[row_index]) else ''
+        return _as_weight(row[weight_at], weight_format)
+    try:
+        market_value = float(str(row[market_value_at]).replace(',', '').strip())
+        return market_value / table['total_fund_value'] * 100 if market_value >= 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _add_file_details(diagnostics: dict[str, Any] | None, payload: bytes, table: dict[str, Any], fund_name: str, holdings: dict[str, float]) -> None:
+    if diagnostics is None or diagnostics.get('_skip_file_details'):
+        return
+    diagnostics['parse_result'] = {'status': 'ok', 'holding_count': len(holdings)}
+    diagnostics['benchmark'] = _benchmark_from_frame(table['frame'])
+    try:
+        diagnostics['risk_level'] = read_scheme_riskometer(payload, table['sheet_name'], table['frame'])
+    except Exception:
+        # The riskometer is optional. It must never stop the holdings being used.
+        logger.exception('Riskometer read failed for %s', fund_name)
+        diagnostics['risk_level'] = None
+
+
+def _read_equity_holdings(
+    payload: bytes,
+    url: str,
+    fund_name: str,
+    parser_key: str,
+    diagnostics: dict[str, Any] | None = None,
+    workbook: tuple[dict[str, pd.DataFrame], dict[str, list[list[str]]]] | None = None,
+) -> dict[str, float]:
+    table = _locate_holdings_table(payload, url, fund_name, diagnostics, workbook)
+    frame, header_at, section_end = table['frame'], table['header_at'], table['section_end']
+    isin_at, weight_at, asset_at, market_value_at = table['isin_at'], table['weight_at'], table['asset_at'], table['market_value_at']
 
     equity_context: bool | None = None
     for row_index in range(header_at):
@@ -631,7 +656,6 @@ def _read_equity_holdings(
     industries: dict[str, str] = {}
     name_at, industry_at = _name_and_industry_columns(frame, header_at, asset_at)
     saw_equity_classification = False
-    cell_formats = formats_by_sheet.get(sheet_name, [])
     for row_index in range(header_at + 1, section_end):
         row = frame.iloc[row_index].tolist()
         section = _section_for_row(row)
@@ -651,16 +675,8 @@ def _read_equity_holdings(
             continue
         isin_value = '' if pd.isna(row[isin_at]) else str(row[isin_at])
         isin = re.sub(r'\s+', '', isin_value).upper()
-        if weight_at is not None:
-            weight_format = cell_formats[row_index][weight_at] if row_index < len(cell_formats) and weight_at < len(cell_formats[row_index]) else ''
-            weight = _as_weight(row[weight_at], weight_format)
-        else:
-            try:
-                market_value = float(str(row[market_value_at]).replace(',', '').strip())
-                weight = market_value / total_fund_value * 100 if market_value >= 0 else None
-            except (TypeError, ValueError):
-                weight = None
-        if len(isin) != 12 or not isin.isalnum() or weight is None:
+        weight = _row_weight(table, row, row_index)
+        if not ISIN_PATTERN.match(isin) or weight is None:
             continue
         holdings[isin] = holdings.get(isin, 0.0) + weight
         if name_at is not None and name_at < len(row):
@@ -670,21 +686,356 @@ def _read_equity_holdings(
 
     if not holdings:
         classification_note = ' Equity rows could not be identified.' if not saw_equity_classification and equity_context is None else ''
-        raise ProviderError(f'No ISIN equity holdings found for {fund_name}.{classification_note}')
+        raise _NoHoldingsFound(f'No ISIN equity holdings found for {fund_name}.{classification_note}')
     if sum(holdings.values()) > 101:
         raise ProviderError(f'Equity holdings weights exceed 100% for {fund_name}')
     if diagnostics is not None:
-        diagnostics['parse_result'] = {'status': 'ok', 'holding_count': len(holdings)}
         diagnostics['holding_names'] = names
         diagnostics['holding_industries'] = industries
-        diagnostics['benchmark'] = _benchmark_from_frame(frame)
-        try:
-            diagnostics['risk_level'] = read_scheme_riskometer(payload, sheet_name, frame)
-        except Exception:
-            # The riskometer is optional. It must never stop the holdings being used.
-            logger.exception('Riskometer read failed for %s', fund_name)
-            diagnostics['risk_level'] = None
+    _add_file_details(diagnostics, payload, table, fund_name, holdings)
     return holdings
+
+
+# AMC files give debt instrument types as heading rows above each block, in their own words.
+# These blocks are not direct debt securities. They stay visible but never count in the overlap.
+ALTERNATIVE_FUND_UNITS = 'Alternative Investment Fund Units'
+MUTUAL_FUND_UNITS = 'Mutual Fund Units / ETFs'
+REPO = 'TREPS / Repo'
+NET_CURRENT_ASSETS = 'Net Current Assets'
+CASH_AND_MARGIN = 'Cash & Margin'
+_OTHER_INSTRUMENT_TYPES = (
+    (r'alternative investment|corporate debt market', ALTERNATIVE_FUND_UNITS),
+    (r'foreign securities', 'Foreign Securities'),
+    (r'mutual fund units|exchange traded', MUTUAL_FUND_UNITS),
+    (r'\breits?\b|\binvits?\b|real estate investment trust|infrastructure investment trust', 'REIT / InvIT Units'),
+    (r'term deposit', 'Term Deposits'),
+    (r'margin|cash', CASH_AND_MARGIN),
+    (r'derivative', 'Derivatives'),
+    (r'treps|repo\b', REPO),
+    (r'net current|net receivable|current assets', NET_CURRENT_ASSETS),
+    (r'equity', 'Equity'),
+)
+_FUND_UNIT_TYPES = (ALTERNATIVE_FUND_UNITS, MUTUAL_FUND_UNITS)
+# Balances, not investments. They appear in the allocation only, never as holdings.
+_BALANCE_TYPES = (NET_CURRENT_ASSETS, CASH_AND_MARGIN)
+# India's ISIN numbering gives mutual fund units the prefix INF, so no heading can make one a bond.
+FUND_UNIT_ISIN_PREFIX = 'INF'
+# Stated weights are rounded to 2 places, so a correct one is at most 0.005 from value / total.
+MAX_WEIGHT_DIFFERENCE = 0.02
+MAX_TOTAL_DIFFERENCE = 1
+_DEBT_INSTRUMENT_TYPES = (
+    (r'state government|\bsdl\b', 'State Government Securities'),
+    (r'government securit|central government|\bg-?sec|\bgilt\b', 'Government Securities'),
+    (r'zero coupon|deep discount', 'Zero Coupon Bonds'),
+    (r'securiti[sz]ed|pass through|\bptc\b', 'Securitised Debt'),
+    (r'certificate of deposit', 'Certificate of Deposit'),
+    (r'commercial paper', 'Commercial Paper'),
+    (r'treasury bill|t-?bill', 'Treasury Bills'),
+    (r'\bstrips\b', 'Government Securities STRIPS'),
+    (r're-?discount', 'Bills Rediscounting'),
+    (r'preference shares', 'Non-Convertible Preference Shares'),
+    (r'non[\s-]*convertible|debenture|\bncds?\b|\bbonds?\b|perpetual', 'Non-Convertible Debentures / Bonds'),
+)
+_DEBT_BLOCK_HEADINGS = re.compile(r'debt instruments|money market')
+_TOTAL_ROW = re.compile(r'^(sub\s*-?\s*total|total|grand total)\b')
+_GRAND_TOTAL_ROW = re.compile(r'^grand\s+total\b')
+
+
+def _other_instrument_type(text: str) -> str | None:
+    value = text.lower()
+    return next((label for pattern, label in _OTHER_INSTRUMENT_TYPES if re.search(pattern, value)), None)
+
+
+def _debt_heading(text: str) -> tuple[bool, str | None] | None:
+    """Read a heading row as (holds debt securities, instrument type). None if it isn't one."""
+    value = re.sub(r'^\(?[a-z0-9]\)\s*', '', re.sub(r'\s+', ' ', text).strip().lower())
+    if not value or _TOTAL_ROW.match(value):
+        return None
+    other_type = _other_instrument_type(value)
+    if other_type or value in ('other', 'others'):
+        return False, other_type
+    for pattern, label in _DEBT_INSTRUMENT_TYPES:
+        if re.search(pattern, value):
+            return True, label
+    return (True, None) if _DEBT_BLOCK_HEADINGS.search(value) else None
+
+
+def _debt_instrument_type(section_type: str | None, name: str, rating: str) -> str:
+    """Use the file's own heading. Some files list several types under one heading."""
+    if section_type:
+        return section_type
+    for pattern, label in _DEBT_INSTRUMENT_TYPES:
+        if re.search(pattern, name.lower()):
+            return label
+    if rating.lower() == 'sovereign' or re.search(r'\b(goi|cgl)\b', name.lower()):
+        return 'Government Securities'
+    return 'Debt Instrument'
+
+
+def _debt_issuer(name: str, rating: str, isin: str) -> str | None:
+    """The issuer, where the instrument's name shows it. Different issues stay separate by ISIN."""
+    lowered = name.lower()
+    state = re.search(r'(?i)state government of ([a-z ]+?)(?:\s+\d|$)|([a-z ]+?)\s+sdl\b', re.sub(r'^\s*[\d.]+%\s*', '', name))
+    if state:
+        return f'State Government of {(state.group(1) or state.group(2)).strip().title()}'
+    if isin.startswith('IN00') or re.search(r'\b(goi|cgl|t-?bill|tbill|government of india)\b', lowered):
+        return 'Government of India'
+    if rating.lower() == 'sovereign':
+        return None
+    issuer = re.sub(r'^\s*[\d.]+%\s*', '', name)
+    issuer = re.split(r'(?i)\s*\(|\s+(?:ncd|ser\b|series\b|tier\b|mat\b|md\b)', issuer)[0].strip(' -')
+    return issuer or None
+
+
+def _signed_row_weight(table: dict[str, Any], row: list, row_index: int) -> float | None:
+    """Like _row_weight, but keeps a minus sign. Net current assets can be negative."""
+    at = table['weight_at'] if table['weight_at'] is not None else table['market_value_at']
+    if at >= len(row):
+        return None
+    raw = '' if pd.isna(row[at]) else str(row[at]).strip()
+    if not raw.startswith('-'):
+        return _row_weight(table, row, row_index)
+    positive = [*row]
+    positive[at] = raw[1:]
+    weight = _row_weight(table, positive, row_index)
+    return -weight if weight is not None else None
+
+
+def _market_value(table: dict[str, Any], row: list) -> float | None:
+    at = table['market_value_at']
+    if at is None or at >= len(row) or pd.isna(row[at]):
+        return None
+    try:
+        return float(str(row[at]).replace(',', '').strip())
+    except ValueError:
+        return None
+
+
+def _read_debt_holdings(
+    payload: bytes,
+    url: str,
+    fund_name: str,
+    parser_key: str,
+    diagnostics: dict[str, Any] | None = None,
+    workbook: tuple[dict[str, pd.DataFrame], dict[str, list[list[str]]]] | None = None,
+) -> dict[str, float]:
+    """Read direct debt securities, each as a percentage of net assets, matched only by ISIN.
+
+    Fund units, repo, cash and net current assets go in other_holdings: they stay
+    visible, but overlap never uses them.
+    """
+    table = _locate_holdings_table(payload, url, fund_name, diagnostics, workbook)
+    frame, isin_at, asset_at = table['frame'], table['isin_at'], table['asset_at']
+    name_at, _ = _name_and_industry_columns(frame, table['header_at'], asset_at)
+    headers = [re.sub(r'[^a-z0-9%]+', ' ', str(value).lower()).strip() if not pd.isna(value) else '' for value in frame.iloc[table['header_at']].tolist()]
+    rating_at = _column_index(headers, ('rating', 'industry'))
+
+    holdings: dict[str, float] = {}
+    names: dict[str, str] = {}
+    ratings: dict[str, str] = {}
+    instrument_types: dict[str, str] = {}
+    issuers: dict[str, str] = {}
+    others: dict[str, dict[str, Any]] = {}
+    stated: list[tuple[float, float]] = []
+    grand_total: float | None = None
+    in_debt = False
+    section_type: str | None = None
+
+    def add_other(isin: str | None, name: str, weight: float, instrument_type: str) -> None:
+        entry = others.setdefault(isin or f'{instrument_type}|{name}', {
+            **({'isin': isin} if isin else {}), 'name': name, 'weight': 0.0, 'instrument_type': instrument_type,
+        })
+        entry['weight'] += weight
+
+    for row_index in range(table['header_at'] + 1, table['section_end']):
+        row = frame.iloc[row_index].tolist()
+        values = [str(value).strip() for value in row if not pd.isna(value) and str(value).strip()]
+        if values and _GRAND_TOTAL_ROW.match(values[0].lower()):
+            # What follows is notes and summaries, which repeat the labels above.
+            grand_total = _market_value(table, row)
+            break
+        isin = re.sub(r'\s+', '', '' if isin_at >= len(row) or pd.isna(row[isin_at]) else str(row[isin_at])).upper()
+        name = _clean_holding_name(row[name_at]) if name_at is not None and name_at < len(row) else ''
+        if not ISIN_PATTERN.match(isin):
+            heading = _debt_heading(values[0]) if values and len(values) <= 4 else None
+            if heading is not None:
+                in_debt, new_type = heading
+                # "Debt Instruments" opens a block. The types inside it come next.
+                section_type = new_type
+            if not in_debt and values and not _TOTAL_ROW.match(values[0].lower()):
+                weight = _signed_row_weight(table, row, row_index)
+                if weight is not None:
+                    add_other(None, name or values[0], weight, _other_instrument_type(' '.join(values)) or section_type or 'Other')
+            continue
+        is_debt, row_type = in_debt, section_type
+        if asset_at is not None and asset_at < len(row) and not pd.isna(row[asset_at]) and str(row[asset_at]).strip():
+            classified = _debt_heading(str(row[asset_at]))
+            is_debt, row_type = bool(classified and classified[0]), classified[1] if classified else None
+        if table['weight_at'] is not None and table['weight_at'] >= len(row):
+            continue
+        if table['weight_at'] is None and table['market_value_at'] >= len(row):
+            continue
+        weight = _row_weight(table, row, row_index)
+        if weight is None:
+            continue
+        market_value = _market_value(table, row)
+        if table['weight_at'] is not None and market_value is not None:
+            stated.append((weight, market_value))
+        is_fund_unit = isin.startswith(FUND_UNIT_ISIN_PREFIX)
+        if is_fund_unit or not is_debt:
+            other_type = _other_instrument_type(name) or row_type or 'Other'
+            if is_fund_unit and other_type not in _FUND_UNIT_TYPES:
+                other_type = MUTUAL_FUND_UNITS
+            # A repo row's "ISIN" is the AMC's own deal code, such as TREP01102026.
+            add_other(None if other_type == REPO else isin, name or isin, weight, other_type)
+            continue
+        holdings[isin] = holdings.get(isin, 0.0) + weight
+        # Not the name cleaner: its footnote removal would turn AA+ into AA.
+        rating = re.sub(r'\s+', ' ', str(row[rating_at])).strip() if rating_at is not None and rating_at < len(row) and not pd.isna(row[rating_at]) else ''
+        names.setdefault(isin, name)
+        ratings.setdefault(isin, rating)
+        instrument_types.setdefault(isin, _debt_instrument_type(section_type, name, rating))
+        issuer = _debt_issuer(name, rating, isin)
+        if issuer:
+            issuers.setdefault(isin, issuer)
+
+    if not holdings:
+        raise _NoHoldingsFound(f'No ISIN debt holdings found for {fund_name}')
+    # Debt schemes can hold slightly over 100% when net current assets are negative.
+    if sum(holdings.values()) > MAX_DEBT_WEIGHT:
+        raise ProviderError(f'Debt holdings weights are too high for {fund_name}')
+    # % to NAV and % to AUM are only comparable if both are a share of the same net assets.
+    if grand_total and grand_total > 0 and stated:
+        worst = max(abs(weight - value / grand_total * 100) for weight, value in stated)
+        if worst > MAX_WEIGHT_DIFFERENCE:
+            raise ProviderError(f'Debt weights for {fund_name} do not match market value over grand total')
+    other_rows = list(others.values())
+    total = sum(holdings.values()) + sum(entry['weight'] for entry in other_rows)
+    if abs(total - 100) > MAX_TOTAL_DIFFERENCE:
+        logger.warning('Debt portfolio rows for %s add up to %.2f%%, not 100%%', fund_name, total)
+    if diagnostics is not None:
+        diagnostics['holding_names'] = names
+        diagnostics['holding_industries'] = ratings
+        diagnostics['instrument_types'] = instrument_types
+        diagnostics['issuers'] = issuers
+        diagnostics['other_holdings'] = other_rows
+    _add_file_details(diagnostics, payload, table, fund_name, holdings)
+    return holdings
+
+
+def _asset_class(record: dict[str, Any] | None) -> str:
+    if record and _is_debt_fund(record):
+        return ASSET_DEBT
+    return ASSET_HYBRID if record and _is_hybrid_fund(record) else ASSET_EQUITY
+
+
+def _read_portfolio(asset_class: str, payload: bytes, url: str, fund_name: str, parser_key: str, diagnostics: dict[str, Any] | None = None, workbook: Any = None) -> dict[str, float]:
+    """Read every eligible security and label each one equity or debt, whatever the fund type.
+
+    The fund's main kind must be readable. For an equity or debt fund the other kind is
+    a bonus: if it can't be read, classes_read says so and the file is still used.
+    """
+    details = diagnostics if diagnostics is not None else {}
+    order = (ASSET_DEBT, ASSET_EQUITY) if asset_class == ASSET_DEBT else (ASSET_EQUITY, ASSET_DEBT)
+    readers = {ASSET_EQUITY: _read_equity_holdings, ASSET_DEBT: _read_debt_holdings}
+    merged_keys = ('holding_names', 'holding_industries', 'instrument_types', 'issuers')
+    holdings: dict[str, float] = {}
+    security_classes: dict[str, str] = {}
+    classes_read: list[str] = []
+    other_rows: list[dict[str, Any]] = []
+    merged: dict[str, dict[str, str]] = {key: {} for key in merged_keys}
+    for index, security_class in enumerate(order):
+        part: dict[str, Any] = {'_skip_file_details': True} if holdings else {}
+        try:
+            rows = readers[security_class](payload, url, fund_name, parser_key, part, workbook)
+        except _NoHoldingsFound:
+            if index == 0 and asset_class != ASSET_HYBRID:
+                raise
+            classes_read.append(security_class)
+            rows = {}
+        except Exception as exc:
+            if index == 0 or asset_class == ASSET_HYBRID:
+                raise
+            logger.info('%s rows not read for %s: %s', security_class, fund_name, exc)
+            continue
+        else:
+            # The main kind decides any row both readers claim, so its results never change.
+            rows = {isin: weight for isin, weight in rows.items() if isin not in holdings}
+            if sum(holdings.values()) + sum(rows.values()) > MAX_DEBT_WEIGHT:
+                if asset_class == ASSET_HYBRID:
+                    raise ProviderError(f'Holdings weights are too high for {fund_name}')
+                continue
+            classes_read.append(security_class)
+        holdings.update(rows)
+        security_classes.update({isin: security_class for isin in rows})
+        for key in merged_keys:
+            merged[key].update({isin: value for isin, value in (part.get(key) or {}).items() if isin in rows})
+        other_rows.extend(part.get('other_holdings') or [])
+        for key, value in part.items():
+            if key not in (*merged_keys, 'other_holdings', '_skip_file_details') and (index == 0 or details.get(key) is None):
+                details[key] = value
+    if not holdings:
+        raise _NoHoldingsFound(f'No ISIN holdings found for {fund_name}')
+    # A row in an equity block that the equity reader didn't take is reported, never dropped.
+    other_rows = [{**row, 'instrument_type': 'Other' if row['instrument_type'] == 'Equity' else row['instrument_type']} for row in other_rows if row.get('isin') not in holdings]
+    unclassified = None
+    if len(classes_read) == 2:
+        # Rows nobody could classify, or a file whose rows don't reach its own total.
+        known_total = sum(holdings.values()) + sum(row['weight'] for row in other_rows)
+        has_total = any(row['instrument_type'] == NET_CURRENT_ASSETS for row in other_rows)
+        unclassified = max(sum(row['weight'] for row in other_rows if row['instrument_type'] == 'Other'), abs(100 - known_total) if has_total else 0.0)
+    details.update(merged)
+    details.update({'security_classes': security_classes, 'classes_read': classes_read, 'other_holdings': other_rows, 'unclassified_weight': unclassified})
+    return holdings
+
+
+def _read_holdings(record: dict[str, Any] | None):
+    asset_class = _asset_class(record)
+
+    def read(payload, url, fund_name, parser_key, diagnostics=None, workbook=None):
+        return _read_portfolio(asset_class, payload, url, fund_name, parser_key, diagnostics, workbook)
+
+    return read
+
+
+def _security_class(data: dict[str, Any], isin: str) -> str:
+    """Files cached before securities were labelled hold one kind only."""
+    return (data.get('security_classes') or {}).get(isin) or (data.get('classes_read') or [ASSET_EQUITY])[0]
+
+
+def _weights_of(data: dict[str, Any], classes: set[str]) -> dict[str, float]:
+    return {isin: weight for isin, weight in data['holdings'].items() if _security_class(data, isin) in classes}
+
+
+def _eligible_classes(left_type: str, right_type: str) -> set[str]:
+    """What both fund types are compared on, or every eligible security if they share nothing."""
+    return (FUND_SECURITY_CLASSES[left_type] & FUND_SECURITY_CLASSES[right_type]) or {ASSET_EQUITY, ASSET_DEBT}
+
+
+def _pair_overlap(left: dict[str, Any], right: dict[str, Any], classes: set[str]) -> dict[str, Any]:
+    """The same formula for every pair. A kind that wasn't compared is None, not zero."""
+    left_weights, right_weights = _weights_of(left, classes), _weights_of(right, classes)
+    common = _common_holdings({**left, 'holdings': left_weights}, {**right, 'holdings': right_weights})
+    overlap = calculate_overlap(left_weights, right_weights)
+
+    def part(security_class: str) -> tuple[float | None, int | None]:
+        if security_class not in classes:
+            return None, None
+        rows = {row['isin'] for row in common if row['security_class'] == security_class}
+        return round(sum(min(left_weights[isin], right_weights[isin]) for isin in rows), 2), len(rows)
+
+    equity_overlap, equity_count = part(ASSET_EQUITY)
+    debt_overlap, debt_count = part(ASSET_DEBT)
+    return {
+        'overlap_pct': overlap,
+        'common_holdings': common,
+        'equity_overlap_pct': equity_overlap,
+        'debt_overlap_pct': debt_overlap,
+        'common_equity_count': equity_count,
+        'common_debt_count': debt_count,
+        'common_count': len(common),
+        'message': None if common else REASON_MESSAGES[REASON_NO_COMMON_SECURITIES],
+    }
 
 
 def calculate_overlap(holdings_a: dict[str, float], holdings_b: dict[str, float]) -> float:
@@ -701,7 +1052,24 @@ def _common_holdings(left: dict[str, Any], right: dict[str, Any]) -> list[dict[s
         'name': left_names.get(isin) or right_names.get(isin) or isin,
         'left_weight': round(left_weights[isin], 2),
         'right_weight': round(right_weights[isin], 2),
+        'overlap_weight': round(min(left_weights[isin], right_weights[isin]), 2),
+        'security_class': _security_class(left, isin),
     } for isin in common]
+
+
+def _fund_units(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {row['isin']: row for row in data.get('other_holdings') or [] if row.get('isin') and row['instrument_type'] in _FUND_UNIT_TYPES}
+
+
+def _common_fund_units(left: dict[str, Any], right: dict[str, Any]) -> list[dict[str, Any]]:
+    """Fund units both schemes hold. These are never part of calculate_overlap."""
+    left_units, right_units = _fund_units(left), _fund_units(right)
+    return [{
+        'isin': isin,
+        'name': left_units[isin]['name'],
+        'left_weight': round(left_units[isin]['weight'], 2),
+        'right_weight': round(right_units[isin]['weight'], 2),
+    } for isin in sorted(left_units.keys() & right_units.keys())]
 
 
 def import_portfolio_holdings(scheme_code: str, portfolio_date: str, filename: str, payload: bytes, source_url: str = '') -> dict[str, Any]:
@@ -720,13 +1088,11 @@ def import_portfolio_holdings(scheme_code: str, portfolio_date: str, filename: s
     record = next((item for item in fetch_amfi_latest() if str(item.get('scheme_code')) == code), None)
     if record is None:
         raise ProviderError('Scheme code was not found in AMFI NAV data')
-    if _is_debt_fund(record):
-        raise ProviderError('Overlap not applicable for debt funds')
     amc_name = record.get('amc') or ''
     if not amc_name:
         raise ProviderError('AMC name was not found in AMFI NAV data')
     diagnostics: dict[str, Any] = {}
-    holdings = _read_equity_holdings(payload, filename, record.get('scheme_name') or '', 'import_by_code', diagnostics)
+    holdings = _read_holdings(record)(payload, filename, record.get('scheme_name') or '', 'import_by_code', diagnostics)
     actual_date = diagnostics.get('reporting_date')
     if not actual_date:
         raise ProviderError('Portfolio reporting date was not found inside the disclosure file')
@@ -746,6 +1112,10 @@ def import_portfolio_holdings(scheme_code: str, portfolio_date: str, filename: s
             'holdings': holdings, 'names': diagnostics.get('holding_names') or {},
             'industries': diagnostics.get('holding_industries') or {}, 'benchmark': diagnostics.get('benchmark'),
             'risk_level': diagnostics.get('risk_level'), 'source_url': source_url,
+            'instrument_types': diagnostics.get('instrument_types') or {}, 'issuers': diagnostics.get('issuers') or {},
+            'other_holdings': diagnostics.get('other_holdings') or [],
+            'security_classes': diagnostics.get('security_classes'), 'classes_read': diagnostics.get('classes_read'),
+            'unclassified_weight': diagnostics.get('unclassified_weight'),
         }, timeout=IMPORTED_HOLDINGS_CACHE_SECONDS)
         index_key = _import_index_key(amc_name, code)
         existing = cache.get(index_key) or []
@@ -758,6 +1128,15 @@ def import_portfolio_holdings(scheme_code: str, portfolio_date: str, filename: s
         raise
     except Exception as exc:
         raise ProviderError('Portfolio holdings cache is unavailable') from exc
+    store_snapshot(record, code, reporting_date.strftime('%Y-%m'), {
+        'holdings': holdings, 'names': diagnostics.get('holding_names'), 'industries': diagnostics.get('holding_industries'),
+        'benchmark': diagnostics.get('benchmark'), 'risk_level': diagnostics.get('risk_level'), 'portfolio_date': reporting_date.isoformat(),
+        'asset_class': _asset_class(record), 'instrument_types': diagnostics.get('instrument_types'), 'issuers': diagnostics.get('issuers'),
+        'other_holdings': diagnostics.get('other_holdings'),
+        'security_classes': diagnostics.get('security_classes'), 'classes_read': diagnostics.get('classes_read'),
+        'unclassified_weight': diagnostics.get('unclassified_weight'),
+    }, source_url=source_url, payload=payload, source_type=SOURCE_IMPORT)
+    record_status(record, HOLDINGS_AVAILABLE, 'Staff upload', reporting_date.strftime('%Y-%m'))
     return {
         'scheme_code': code,
         'scheme_name': record.get('scheme_name'),
@@ -765,6 +1144,17 @@ def import_portfolio_holdings(scheme_code: str, portfolio_date: str, filename: s
         'portfolio_date': reporting_date.isoformat(),
         'holding_count': len(holdings),
     }
+
+
+def _ensure_classes(needed: set[str], code: str, month: str, data: dict[str, Any], source: dict[str, Any], scheme_name: str, debug: dict[str, Any], downloaded: dict[str, bytes], workbooks: dict[str, Any], record: dict[str, Any] | None) -> dict[str, Any]:
+    """A file cached before securities were labelled lacks a kind. Re-read the official file once."""
+    if needed <= set(data.get('classes_read') or []) or not data.get('source_url'):
+        return data
+    try:
+        return _holdings_from_link(code, month, {'url': data['source_url'], 'month': month}, source, scheme_name, debug, downloaded, workbooks, record)
+    except Exception as exc:
+        logger.warning('Portfolio %s could not be re-read for scheme %s: %s', month, code, str(exc) or exc.__class__.__name__)
+        return data
 
 
 def _empty_highest_overlap(total_pairs: int) -> dict[str, Any]:
@@ -782,6 +1172,7 @@ def _empty_highest_overlap(total_pairs: int) -> dict[str, Any]:
         'compared_pairs': 0,
         'total_pairs': total_pairs,
         'message': 'Portfolio holdings unavailable',
+        'reason_code': REASON_HOLDINGS_UNAVAILABLE,
     }
 
 
@@ -794,9 +1185,27 @@ def _holdings_from_link(
     debug: dict[str, Any],
     downloaded: dict[str, bytes],
     workbooks: dict[str, tuple[dict[str, pd.DataFrame], dict[str, list[list[str]]]]],
+    record: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Load one month's verified holdings from a cached entry or a disclosure file."""
-    if link.get('imported') or link.get('cached'):
+    """Load one month's verified holdings from storage, a cached entry or a disclosure file."""
+    instrument_types: dict[str, str] = {}
+    issuers: dict[str, str] = {}
+    other_holdings: list[dict[str, Any]] = []
+    security_classes: dict[str, str] = {}
+    default_classes = ['debt' if _asset_class(record) == ASSET_DEBT else 'equity']
+    classes_read: list[str] = default_classes
+    unclassified_weight: float | None = None
+    source_url = link['url'] if str(link.get('url', '')).startswith('http') else ''
+    if link.get('stored'):
+        stored = load_snapshot(link['snapshot_id'])
+        holdings, names, industries = stored['holdings'], stored['names'], stored['industries']
+        benchmark, risk_level, reporting_date = stored['benchmark'], stored['risk_level'], stored['portfolio_date']
+        instrument_types, issuers = stored['instrument_types'], stored['issuers']
+        other_holdings = stored['other_holdings']
+        security_classes, classes_read = stored['security_classes'], stored['classes_read']
+        unclassified_weight, source_url = stored['unclassified_weight'], stored['source_url']
+        debug['parse_result'] = {'status': 'ok', 'holding_count': len(holdings), 'source': 'stored'}
+    elif link.get('imported') or link.get('cached'):
         cached = cache.get(link['cache_key'])
         if not cached or not cached.get('holdings'):
             raise ProviderError('Cached monthly holdings expired')
@@ -805,6 +1214,10 @@ def _holdings_from_link(
         industries = cached.get('industries') or {}
         benchmark = cached.get('benchmark')
         risk_level = cached.get('risk_level')
+        instrument_types, issuers = cached.get('instrument_types') or {}, cached.get('issuers') or {}
+        other_holdings = cached.get('other_holdings') or []
+        security_classes, classes_read = cached.get('security_classes') or {}, cached.get('classes_read') or default_classes
+        unclassified_weight = cached.get('unclassified_weight')
         reporting_date = cached.get('portfolio_date') or link.get('portfolio_date')
         debug['parse_result'] = {
             'status': 'ok', 'holding_count': len(holdings),
@@ -815,7 +1228,7 @@ def _holdings_from_link(
             downloaded[link['url']] = _download_cached(source['key'], month, link['url'])
         if link['url'] not in workbooks:
             workbooks[link['url']] = _workbook_sheets(downloaded[link['url']], urlsplit(link['url']).path.lower())
-        holdings = _read_equity_holdings(
+        holdings = _read_holdings(record)(
             downloaded[link['url']], link['url'], scheme_name, source['parser'],
             debug, workbooks[link['url']],
         )
@@ -824,6 +1237,12 @@ def _holdings_from_link(
         industries = debug.pop('holding_industries', {})
         benchmark = debug.pop('benchmark', None)
         risk_level = debug.pop('risk_level', None)
+        instrument_types = debug.pop('instrument_types', {})
+        issuers = debug.pop('issuers', {})
+        other_holdings = debug.pop('other_holdings', [])
+        security_classes = debug.pop('security_classes', {})
+        classes_read = debug.pop('classes_read', default_classes)
+        unclassified_weight = debug.pop('unclassified_weight', None)
         reporting_date = debug.get('reporting_date')
     if not reporting_date:
         raise ProviderError('Portfolio reporting date was not found inside the disclosure file')
@@ -834,15 +1253,32 @@ def _holdings_from_link(
         'status': 'ok', 'holding_count': len(holdings),
         **({'source': source_label} if source_label else {}),
     }
-    if link.get('cached') or link.get('imported'):
-        debug['matched_sheet_name'] = 'Cached holdings'
-    if not link.get('imported') and not link.get('cached'):
-        _cache_parsed_holdings(code, reporting_date, holdings, link['url'], names, industries, benchmark, risk_level)
-    return {
+    if link.get('cached') or link.get('imported') or link.get('stored'):
+        debug['matched_sheet_name'] = 'Stored holdings' if link.get('stored') else 'Cached holdings'
+    result = {
         'holdings': holdings, 'names': names, 'industries': industries, 'benchmark': benchmark, 'risk_level': risk_level, 'portfolio_date': reporting_date,
         'matched_sheet_name': debug['matched_sheet_name'],
         'source': source_label,
+        'asset_class': _asset_class(record),
+        'instrument_types': instrument_types,
+        'issuers': issuers,
+        'other_holdings': other_holdings,
+        'security_classes': security_classes,
+        'classes_read': classes_read,
+        'unclassified_weight': unclassified_weight,
+        'source_url': source_url,
     }
+    if not link.get('imported') and not link.get('cached') and not link.get('stored'):
+        _cache_parsed_holdings(code, reporting_date, holdings, link['url'], names, industries, benchmark, risk_level, instrument_types, issuers, other_holdings, {'security_classes': security_classes, 'classes_read': classes_read, 'unclassified_weight': unclassified_weight})
+        if record:
+            store_snapshot(record, code, month, result, source_url=link['url'], payload=downloaded.get(link['url']))
+    return result
+
+
+def _link_error_status(link: dict[str, Any], error: Exception) -> str:
+    """HDFC's file host answers 403 for a monthly file that does not exist yet."""
+    status = classify_error(error)
+    return DISCLOSURE_NOT_PUBLISHED if link.get('guessed') and status == DOWNLOAD_BLOCKED else status
 
 
 def _asset_allocation(weights: dict[str, float]) -> dict[str, float]:
@@ -854,6 +1290,41 @@ def _asset_allocation(weights: dict[str, float]) -> dict[str, float]:
         'international_equity': round(international, 2),
         'other': round(max(0.0, 100 - indian - international), 2),
     }
+
+
+def _debt_allocation(weights: dict[str, float]) -> dict[str, float]:
+    """Other is what the debt securities leave: fund units, repo, cash and net current assets.
+
+    It goes below zero when net current assets are negative, which is what puts the
+    securities above 100%. Liquid funds often show this at month end.
+    """
+    total = sum(weights.values())
+    return {'debt_securities': round(total, 2), 'other': round(100 - total, 2)}
+
+
+def _hybrid_allocation(equity: dict[str, float], debt: dict[str, float]) -> dict[str, float]:
+    """Both parts as a share of the whole scheme. Neither is scaled to 100%."""
+    equity_total, debt_total = sum(equity.values()), sum(debt.values())
+    return {'equity': round(equity_total, 2), 'debt_securities': round(debt_total, 2), 'other': round(100 - equity_total - debt_total, 2)}
+
+
+def _debt_instrument_allocation(weights: dict[str, float], instrument_types: dict[str, str], others: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every instrument type in the file, so the rows add up to the whole portfolio."""
+    totals: dict[str, float] = {}
+    for isin, weight in weights.items():
+        kind = instrument_types.get(isin) or 'Debt Instrument'
+        totals[kind] = totals.get(kind, 0.0) + weight
+    for row in others:
+        totals[row['instrument_type']] = totals.get(row['instrument_type'], 0.0) + row['weight']
+    return [{'name': name, 'weight': round(weight, 2)} for name, weight in sorted(totals.items(), key=lambda item: (-item[1], item[0]))]
+
+
+def _debt_other_rows(others: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Fund units and repo as the file lists them. Overlap does not use these."""
+    return [{
+        **({'isin': row['isin']} if row.get('isin') else {}),
+        'name': row['name'], 'weight': round(row['weight'], 2), 'instrument_type': row['instrument_type'], 'excluded_from_overlap': True,
+    } for row in others if row['instrument_type'] not in _BALANCE_TYPES and row['weight'] > 0]
 
 
 def _sector_allocation(weights: dict[str, float], industries: dict[str, str]) -> list[dict[str, Any]]:
@@ -872,24 +1343,26 @@ def _sector_allocation(weights: dict[str, float], industries: dict[str, str]) ->
 
 
 def fetch_fund_holdings(code: str, record: dict[str, Any] | None) -> dict[str, Any]:
-    """Latest verified equity holdings for one fund, largest first, with their breakdowns."""
-    empty = {'holdings': [], 'holdings_as_of': None, 'benchmark': None, 'allocation': None, 'sectors': [], 'riskometer': None}
-    if not record or _is_debt_fund(record):
+    """Latest verified holdings for one fund, largest first, with their breakdowns."""
+    empty = {'holdings': [], 'holdings_as_of': None, 'benchmark': None, 'allocation': None, 'sectors': [], 'riskometer': None, 'asset_class': _asset_class(record)}
+    if not record:
         return empty
     amc_name = record.get('amc') or ''
+    stored = stored_links(record)
     try:
-        links = [*_imported_links(amc_name, code), *_parsed_links(code)]
+        links = [*stored, *_imported_links(amc_name, code), *_parsed_links(code)]
     except Exception as exc:
         logger.warning('Portfolio holdings cache unavailable for %s: %s', code, exc)
-        links = []
-    source = AMC_SOURCES.get(amc_name)
-    if source:
+        links = list(stored)
+    source = source_for_amc(amc_name)
+    name = file_scheme_name(record)
+    if source and discovery_due(record):
         try:
-            links += _monthly_files_for_fund(source, record.get('scheme_name') or '')
+            links += _monthly_files_for_fund(source, name)
         except ProviderError as exc:
             logger.warning('Portfolio link lookup failed for AMC %s: %s', amc_name, exc)
     recent_months = _recent_portfolio_months()
-    # A stable sort keeps uploaded and cached entries ahead of downloads within a month.
+    # A stable sort keeps stored and uploaded entries ahead of downloads within a month.
     links = sorted((link for link in links if link.get('month') in recent_months), key=lambda link: link['month'], reverse=True)
     source = source or {'key': _amc_directory_name(amc_name), 'parser': 'import_by_code'}
     debug = _overlap_debug_record(code, record)
@@ -897,20 +1370,45 @@ def fetch_fund_holdings(code: str, record: dict[str, Any] | None) -> dict[str, A
     workbooks: dict[str, tuple[dict[str, pd.DataFrame], dict[str, list[list[str]]]]] = {}
     for link in links:
         try:
-            result = _holdings_from_link(code, link['month'], link, source, record.get('scheme_name') or '', debug, downloaded, workbooks)
+            result = _holdings_from_link(code, link['month'], link, source, name, debug, downloaded, workbooks, record)
         except Exception as exc:
             logger.warning('Portfolio %s failed for scheme %s: %s', link['month'], code, str(exc) or exc.__class__.__name__)
             continue
-        weights, names = result['holdings'], result['names']
+        asset_class = _asset_class(record)
+        needed = FUND_SECURITY_CLASSES[asset_class]
+        result = _ensure_classes(needed, code, link['month'], result, source, name, debug, downloaded, workbooks, record)
+        # An equity fund shows its equity rows only, as it always has.
+        weights, names = _weights_of(result, needed), result['names']
+        instrument_types, issuers = result.get('instrument_types') or {}, result.get('issuers') or {}
+        industries = result.get('industries') or {}
+        others = (result.get('other_holdings') or []) if asset_class != ASSET_EQUITY else []
+        is_hybrid = asset_class == ASSET_HYBRID
+        equity_rows = _weights_of(result, {ASSET_EQUITY}) if is_hybrid else {}
+        rows = [
+            {
+                'isin': isin, 'name': names.get(isin) or isin, 'weight': round(weights[isin], 2),
+                **({'instrument_type': 'Equity Shares'} if isin in equity_rows else {}),
+                **({'sector': industries[isin]} if isin in equity_rows and industries.get(isin) else {}),
+                **({'instrument_type': instrument_types[isin]} if instrument_types.get(isin) else {}),
+                **({'issuer': issuers[isin]} if issuers.get(isin) else {}),
+                **({'rating': industries[isin]} if asset_class != ASSET_EQUITY and isin not in equity_rows and industries.get(isin) else {}),
+            }
+            for isin in sorted(weights, key=lambda isin: (-weights[isin], isin))
+        ]
+        instrument_labels = {**instrument_types, **{isin: 'Equity Shares' for isin in equity_rows}}
+        if asset_class == ASSET_DEBT:
+            allocation = _debt_allocation(weights)
+        elif is_hybrid:
+            allocation = _hybrid_allocation(equity_rows, _weights_of(result, {ASSET_DEBT}))
+        else:
+            allocation = _asset_allocation(weights)
         return {
-            'holdings': [
-                {'isin': isin, 'name': names.get(isin) or isin, 'weight': round(weights[isin], 2)}
-                for isin in sorted(weights, key=lambda isin: (-weights[isin], isin))
-            ],
+            'holdings': sorted([*rows, *_debt_other_rows(others)], key=lambda row: -row['weight']),
             'holdings_as_of': result['portfolio_date'],
             'benchmark': result.get('benchmark'),
-            'allocation': _asset_allocation(weights),
-            'sectors': _sector_allocation(weights, result.get('industries') or {}),
+            'asset_class': asset_class,
+            'allocation': allocation,
+            'sectors': _debt_instrument_allocation(weights, instrument_labels, others) if asset_class != ASSET_EQUITY else _sector_allocation(weights, industries),
             'riskometer': {
                 'level': result['risk_level'],
                 'as_of': result['portfolio_date'],
@@ -918,6 +1416,21 @@ def fetch_fund_holdings(code: str, record: dict[str, Any] | None) -> dict[str, A
             } if result.get('risk_level') else None,
         }
     return empty
+
+
+def _overlap_reason(highest_pair: dict[str, Any] | None, funds: list[dict[str, Any]], unavailable_pairs: list[dict[str, Any]]) -> str | None:
+    """Say why there is no overlap figure, or why the figure is zero."""
+    if highest_pair:
+        return REASON_NO_COMMON_SECURITIES if not highest_pair['common_holdings'] else None
+    available = [fund for fund in funds if fund.get('available')]
+    if unavailable_pairs:
+        return REASON_HOLDINGS_UNAVAILABLE
+    statuses = {fund.get('status') for fund in funds if not fund.get('available')}
+    if statuses & {PARSING_FAILED, INVALID_WORKBOOK}:
+        return REASON_PARSER_UNSUPPORTED
+    if len(available) >= 2 or statuses == {NO_COMMON_MONTH}:
+        return REASON_NO_COMMON_MONTH
+    return REASON_HOLDINGS_UNAVAILABLE
 
 
 def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
@@ -930,6 +1443,7 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
             'highest_pair': None,
             'highest_overlap': _empty_highest_overlap(0),
             'available': False,
+            'status': NO_COMMON_MONTH,
             'debug': [_overlap_debug_record(str(code), error='At least two funds are required for overlap comparison') for code in scheme_codes],
         }
     try:
@@ -939,12 +1453,13 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
         logger.debug('Holdings overlap diagnostics: %s', debug)
         return {
             'portfolio_month': None,
-            'funds': [{'scheme_code': str(code), 'available': False, 'reason': 'AMC lookup unavailable'} for code in scheme_codes],
+            'funds': [{'scheme_code': str(code), 'available': False, 'reason': 'AMC lookup unavailable', 'status': DOWNLOAD_FAILED} for code in scheme_codes],
             'pairs': [],
             'pairs_different_months': False,
             'highest_pair': None,
             'highest_overlap': _empty_highest_overlap(len(scheme_codes) * (len(scheme_codes) - 1) // 2),
             'available': False,
+            'status': DOWNLOAD_FAILED,
             'debug': debug,
         }
     record_by_code = {str(row.get('scheme_code')): row for row in latest_records}
@@ -953,6 +1468,9 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
     debug_by_code: dict[str, dict[str, Any]] = {}
     links_by_code: dict[str, list[dict[str, str]]] = {}
     source_by_code: dict[str, dict] = {}
+    name_by_code: dict[str, str] = {}
+    checked_sources: set[str] = set()
+    status_by_code: dict[str, str] = {}
 
     for code in scheme_codes:
         code = str(code)
@@ -961,20 +1479,10 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
         debug_by_code[code] = debug
         if not record:
             debug['error'] = 'Fund is missing from the latest AMFI scheme list'
+            status_by_code[code] = SCHEME_NOT_FOUND
             fund_results.append({'scheme_code': code, 'available': False, 'reason': debug['error']})
             continue
         amc_name = record.get('amc') or ''
-        if _is_debt_fund(record):
-            debug['parse_result'] = {'status': 'skipped', 'reason': 'debt_fund_restriction'}
-            debug['error'] = 'Overlap not applicable for debt funds'
-            fund_results.append({
-                'scheme_code': code,
-                'scheme_name': record.get('scheme_name'),
-                'amc': amc_name,
-                'available': False,
-                'reason': debug['error'],
-            })
-            continue
         try:
             imported_links = _imported_links(amc_name, code)
             parsed_links = _parsed_links(code)
@@ -982,23 +1490,32 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
             logger.warning('Portfolio holdings cache unavailable for %s: %s', code, exc)
             imported_links = []
             parsed_links = []
-        source = AMC_SOURCES.get(amc_name)
-        if not source and not imported_links and not parsed_links:
+        stored = stored_links(record)
+        name_by_code[code] = file_scheme_name(record)
+        source = source_for_amc(amc_name)
+        if not source and not imported_links and not parsed_links and not stored:
             debug['error'] = 'Overlap not available for this AMC'
+            # The background job may know why, such as a blocked AMC website.
+            status_by_code[code] = source_status(record) or SOURCE_NOT_SUPPORTED
             fund_results.append({'scheme_code': code, 'scheme_name': record.get('scheme_name'), 'amc': amc_name, 'available': False, 'reason': debug['error']})
             continue
         remote_links = []
         try:
-            if source:
-                remote_links = _monthly_files_for_fund(source, record.get('scheme_name') or '')
+            # Ask the AMC's site only when no recent check has already answered this.
+            if source and discovery_due(record):
+                checked_sources.add(code)
+                remote_links = _monthly_files_for_fund(source, name_by_code[code])
                 listing_errors = [link['listing_error'] for link in remote_links if link.get('listing_error')]
                 if listing_errors:
                     debug['error'] = listing_errors[0]
+            elif source and not stored:
+                status_by_code[code] = source_status(record) or DOWNLOAD_FAILED
+                debug['error'] = 'Waiting before asking this source again'
         except ProviderError as exc:
             logger.warning('Portfolio link lookup failed for AMC %s: %s', amc_name, exc)
             debug['error'] = str(exc)
         try:
-            links = [link for link in [*imported_links, *parsed_links, *remote_links] if link.get('month') in recent_months]
+            links = [link for link in [*stored, *imported_links, *parsed_links, *remote_links] if link.get('month') in recent_months]
             if not links:
                 raise ProviderError('No monthly portfolio links or cached holdings in the lookback period')
             months = sorted({str(link.get('month')) for link in links if link.get('month')})
@@ -1008,6 +1525,9 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
             fund_results.append({'scheme_code': code, 'scheme_name': record.get('scheme_name'), 'amc': amc_name, 'available': False, 'reason': 'Waiting for a common portfolio month'})
         except ProviderError as exc:
             debug['error'] = debug['error'] or str(exc)
+            # A directory page that lists nothing usable is a source we can't read yet.
+            if source and source.get('parser') == 'directory_monthly_excel' and classify_error(debug['error']) == DISCLOSURE_NOT_PUBLISHED:
+                status_by_code.setdefault(code, SOURCE_NOT_SUPPORTED)
             fund_results.append({'scheme_code': code, 'scheme_name': record.get('scheme_name'), 'amc': amc_name, 'available': False, 'reason': 'Overlap unavailable right now'})
 
     supported_codes = list(links_by_code)
@@ -1032,11 +1552,12 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
                 try:
                     month_results[code] = _holdings_from_link(
                         code, month, link, source_by_code[code],
-                        record_by_code[code].get('scheme_name') or '', debug, downloaded, workbooks,
+                        name_by_code[code], debug, downloaded, workbooks, record_by_code[code],
                     )
                     break
                 except Exception as exc:
                     error = str(exc) or exc.__class__.__name__
+                    status_by_code.setdefault(code, _link_error_status(link, exc))
                     logger.warning('Portfolio %s failed for scheme %s: %s', month, code, error)
                     debug['errors_by_month'].setdefault(month, []).append(error)
                     debug['error'] = error
@@ -1057,7 +1578,10 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
             selected = valid_by_month[best_month][code]
             fund.update({
                 'available': True, 'reason': None, 'portfolio_month': best_month,
-                'portfolio_date': selected['portfolio_date'], 'holding_count': len(selected['holdings']),
+                'portfolio_date': selected['portfolio_date'],
+                'holding_count': len(_weights_of(selected, FUND_SECURITY_CLASSES[_asset_class(record_by_code[code])])),
+                'asset_class': _asset_class(record_by_code[code]),
+                **({'unclassified_pct': round(selected['unclassified_weight'], 2)} if (selected.get('unclassified_weight') or 0) > MATERIAL_UNCLASSIFIED_WEIGHT else {}),
             })
             debug_by_code[code]['chosen_common_month'] = best_month
             debug_by_code[code]['reporting_date'] = selected['portfolio_date']
@@ -1066,14 +1590,28 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
                 'status': 'ok', 'holding_count': len(selected['holdings']),
                 **({'source': selected['source']} if selected['source'] else {}),
             }
+            status_by_code[code] = HOLDINGS_AVAILABLE
         else:
             fund['reason'] = 'Overlap unavailable right now'
             debug_by_code[code]['error'] = debug_by_code[code]['error'] or (
                 'No valid common-month holdings in the lookback period'
                 if candidate_months else 'No portfolio month shared with another selected fund'
             )
+            if not debug_by_code[code]['attempted_months']:
+                status_by_code[code] = NO_COMMON_MONTH
+
+    for fund in fund_results:
+        code = fund['scheme_code']
+        status = status_by_code.get(code) or classify_error(debug_by_code[code]['error'] or 'No monthly portfolio files')
+        fund['status'] = status
+        debug_by_code[code]['status'] = status
+        # No common month says nothing about the source: its file wasn't even opened,
+        # so it must not make the next request wait a day before trying it.
+        if code in checked_sources and status != NO_COMMON_MONTH:
+            record_status(record_by_code[code], status, debug_by_code[code]['error'] or '', fund.get('portfolio_month'))
 
     pairs = []
+    unavailable_pairs = []
     for left_index, left_code in enumerate(scheme_codes):
         for right_code in scheme_codes[left_index + 1:]:
             left_code, right_code = str(left_code), str(right_code)
@@ -1089,13 +1627,31 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
             right_data = valid_by_month[pair_month][right_code]
             left_record = record_by_code[left_code]
             right_record = record_by_code[right_code]
+            classes = _eligible_classes(_asset_class(left_record), _asset_class(right_record))
+            for code, data, record in ((left_code, left_data, left_record), (right_code, right_data, right_record)):
+                fresh = _ensure_classes(classes, code, pair_month, data, source_by_code[code], name_by_code[code], debug_by_code[code], downloaded, workbooks, record)
+                valid_by_month[pair_month][code] = fresh
+            left_data, right_data = valid_by_month[pair_month][left_code], valid_by_month[pair_month][right_code]
+            # Without the rows of a kind we can't say the funds share none of it, so 0% would mislead.
+            if not (classes <= set(left_data.get('classes_read') or []) and classes <= set(right_data.get('classes_read') or [])):
+                unavailable_pairs.append({'left': left_code, 'right': right_code, 'portfolio_month': pair_month, 'reason': REASON_HOLDINGS_UNAVAILABLE})
+                continue
+            comparison = _pair_overlap(left_data, right_data, classes)
+            overlap_pct = comparison['overlap_pct']
+            # Fund units are never part of a stock comparison, or of overlap_pct itself.
+            fund_units = _common_fund_units(left_data, right_data) if ASSET_DEBT in classes else []
             pairs.append({
                 'left': {'scheme_code': left_code, 'scheme_name': left_record.get('scheme_name')},
                 'right': {'scheme_code': right_code, 'scheme_name': right_record.get('scheme_name')},
-                'overlap_pct': calculate_overlap(left_data['holdings'], right_data['holdings']),
-                'common_holdings': _common_holdings(left_data, right_data),
+                **comparison,
+                'incomplete_coverage': any((data.get('unclassified_weight') or 0) > MATERIAL_UNCLASSIFIED_WEIGHT for data in (left_data, right_data)),
                 'portfolio_month': pair_month,
                 'portfolio_date': left_data['portfolio_date'] if left_data['portfolio_date'] == right_data['portfolio_date'] else None,
+                # A second figure for reference. overlap_pct above never includes fund units.
+                **({'including_fund_units': {
+                    'overlap_pct': round(overlap_pct + sum(min(unit['left_weight'], unit['right_weight']) for unit in fund_units), 2),
+                    'fund_units': fund_units,
+                }} if fund_units else {}),
             })
 
     highest_pair = max(pairs, key=lambda pair: pair['overlap_pct'], default=None)
@@ -1106,13 +1662,14 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
     if highest_pair is not None:
         highest_pair = {**highest_pair, 'overlap_pct': round(highest_pair['overlap_pct'], 2)}
     total_pairs = len(scheme_codes) * (len(scheme_codes) - 1) // 2
-    unavailable_reasons = {fund.get('reason') for fund in fund_results if not fund.get('available')}
-    if 'Overlap not applicable for debt funds' in unavailable_reasons:
-        unavailable_message = 'Overlap not applicable for debt funds'
-    elif 'Overlap not available for this AMC' in unavailable_reasons:
-        unavailable_message = 'Overlap not available for this AMC'
+    selected_records = [record_by_code[str(code)] for code in scheme_codes if str(code) in record_by_code]
+    has_debt = any(_asset_class(record) != ASSET_EQUITY for record in selected_records)
+    reason_code = _overlap_reason(highest_pair, fund_results, unavailable_pairs)
+    if highest_pair:
+        # Equity selections keep showing a plain 0.00%.
+        highest_message = REASON_MESSAGES[reason_code] if has_debt and reason_code else None
     else:
-        unavailable_message = 'Portfolio holdings unavailable'
+        highest_message = REASON_MESSAGES[reason_code] if has_debt else 'Portfolio holdings unavailable'
     highest_overlap = {
         'available': highest_pair is not None,
         'percentage': round(highest_pair['overlap_pct'], 2) if highest_pair else None,
@@ -1126,17 +1683,26 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
         'partial_coverage': bool(highest_pair and len(pairs) < total_pairs),
         'compared_pairs': len(pairs),
         'total_pairs': total_pairs,
-        'message': None if highest_pair else unavailable_message,
+        'message': highest_message,
+        'reason_code': reason_code,
     }
     debug = [debug_by_code[str(code)] for code in scheme_codes]
     logger.debug('Holdings overlap diagnostics: %s', debug)
+    if highest_pair is not None:
+        overall_status = HOLDINGS_AVAILABLE
+    elif sum(1 for fund in fund_results if fund.get('available')) >= 2:
+        overall_status = NO_COMMON_MONTH
+    else:
+        overall_status = next((fund['status'] for fund in fund_results if fund['status'] != HOLDINGS_AVAILABLE), NO_COMMON_MONTH)
     return {
         'portfolio_month': selected_month,
         'funds': fund_results,
         'pairs': rounded_pairs,
+        'unavailable_pairs': unavailable_pairs,
         'pairs_different_months': pairs_different_months,
         'highest_pair': highest_pair,
         'highest_overlap': highest_overlap,
         'available': highest_pair is not None,
+        'status': overall_status,
         'debug': debug,
     }

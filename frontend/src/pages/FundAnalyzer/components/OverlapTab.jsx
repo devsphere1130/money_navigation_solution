@@ -9,6 +9,9 @@ const shortName = (name) => name.split(' - ')[0].replace(/ Fund$/i, '');
 const pairKey = (pair) => `${pair.left.scheme_code}-${pair.right.scheme_code}`;
 const cellColor = (value) => `rgba(194, 144, 53, ${0.12 + 0.88 * Math.min(value / SCALE_MAX, 1)})`;
 const overlapLevel = (value) => (value < 25 ? 'Low overlap' : value <= 50 ? 'Moderate overlap' : 'High overlap');
+const pct = (value) => (value == null ? '—' : `${value.toFixed(2)}%`);
+const count = (value) => (value == null ? '—' : value);
+const classLabel = { equity: 'Equity', debt: 'Debt' };
 const monthLabel = (month) => (month
   ? new Date(`${month}-01T00:00:00Z`).toLocaleString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' })
   : null);
@@ -39,6 +42,7 @@ function Matrix({ funds, pairs, selected, onSelect }) {
 
 function PairDetail({ pair, colorOf }) {
   const stocks = pair.common_holdings;
+  const withUnits = pair.including_fund_units;
   const largest = Math.max(1, ...stocks.flatMap((stock) => [stock.left_weight, stock.right_weight]));
   const bar = (weight, code) => <span>
     <i style={{ width: `${Math.max(3, (weight / largest) * 46)}px`, background: colorOf(code) }} />{weight.toFixed(2)}%
@@ -52,13 +56,19 @@ function PairDetail({ pair, colorOf }) {
       </div>
       <div className="fa-pair__total"><strong>{pair.overlap_pct.toFixed(2)}%</strong><span>OVERLAP</span><small>{monthLabel(pair.portfolio_month)}</small></div>
     </div>
+    <dl className="fa-pair__split">
+      <div><dt>EQUITY</dt><dd>{pct(pair.equity_overlap_pct)}</dd><small>{count(pair.common_equity_count)} common</small></div>
+      <div><dt>DEBT</dt><dd>{pct(pair.debt_overlap_pct)}</dd><small>{count(pair.common_debt_count)} common</small></div>
+      <div><dt>COMBINED</dt><dd>{pct(pair.overlap_pct)}</dd><small>{pair.common_count} common</small></div>
+    </dl>
+    {withUnits && <p className="fa-pair__units">Including fund units: <strong>{withUnits.overlap_pct.toFixed(2)}%</strong>. Adds {withUnits.fund_units.map((unit) => `${unit.name} (${unit.left_weight.toFixed(2)}% and ${unit.right_weight.toFixed(2)}%)`).join(', ')}. The overlap above covers direct debt securities only.</p>}
     {stocks.length === 0
-      ? <p className="fa-pair__none">These funds hold no stocks in common.</p>
+      ? <p className="fa-pair__none">{pair.message || 'No common securities'}</p>
       : <>
         <div className="fa-pair__columns"><span>COMMON HOLDINGS ({stocks.length})</span><span>WEIGHT IN EACH</span></div>
         <div className="fa-pair__list">
           {stocks.map((stock) => <div key={stock.isin} className="fa-pair__row">
-            <span title={stock.isin}>{stock.name}</span>
+            <span title={stock.isin}>{stock.name}<small className="fa-pair__meta">{classLabel[stock.security_class]} · adds {stock.overlap_weight.toFixed(2)}%</small></span>
             <div className="fa-pair__bars">{bar(stock.left_weight, pair.left.scheme_code)}{bar(stock.right_weight, pair.right.scheme_code)}</div>
           </div>)}
         </div>
@@ -68,7 +78,7 @@ function PairDetail({ pair, colorOf }) {
 
 function TopPairs({ pairs, selected, onSelect, colorOf }) {
   return <section className="fa-card fa-pairs">
-    <div className="fa-section-head fa-section-head--flush"><h2>Highest overlapping pairs</h2><p>Funds that share the most portfolio weight, with the stocks they hold in common.</p></div>
+    <div className="fa-section-head fa-section-head--flush"><h2>Highest overlapping pairs</h2><p>Funds that share the most portfolio weight, with the securities they hold in common.</p></div>
     {pairs.slice(0, TOP_PAIRS).map((pair, index) => {
       const hidden = pair.common_holdings.length - STOCK_CHIPS;
       return <button key={pairKey(pair)} type="button" className={`fa-pairs__row${selected && pairKey(selected) === pairKey(pair) ? ' fa-pairs__row--active' : ''}`} onClick={() => onSelect(pairKey(pair))}>
@@ -98,13 +108,17 @@ export default function OverlapTab({ funds, overlap, overlapLoading }) {
   const colorOf = (code) => funds.find((fund) => fund.scheme_code === code)?.color;
   const skipped = (overlap.funds || []).filter((fund) => !fund.available);
   const month = monthLabel(overlap.portfolio_month);
+  const unclassified = (overlap.funds || []).filter((fund) => fund.unclassified_pct);
+  const notEquityOnly = (overlap.funds || []).some((fund) => fund.asset_class && fund.asset_class !== 'equity');
 
   return <>
     <p className="fa-notice">
       <Info size={15} />
       <span>
-        <strong>Official AMC holdings.</strong> Overlap uses each fund's disclosed equity portfolio, matched by ISIN{month ? `, as of ${month}` : ''}.
+        <strong>Official AMC holdings.</strong> Overlap uses each fund's disclosed {notEquityOnly ? 'securities' : 'equity portfolio'}, matched by ISIN{month ? `, as of ${month}` : ''}.
         {overlap.pairs_different_months && ' Pairs use different reporting months, so compare them with care.'}
+        {overlap.unavailable_pairs?.length > 0 && ` ${overlap.unavailable_pairs.length} pair(s) could not be compared because the holdings could not be fully read.`}
+        {unclassified.length > 0 && ` Incomplete coverage: ${unclassified.map((fund) => `${fund.scheme_name} has ${fund.unclassified_pct.toFixed(2)}% of NAV we could not classify`).join('; ')}.`}
         {skipped.length > 0 && ` Not compared: ${skipped.map((fund) => `${fund.scheme_name || fund.scheme_code} (${fund.reason})`).join('; ')}.`}
       </span>
     </p>

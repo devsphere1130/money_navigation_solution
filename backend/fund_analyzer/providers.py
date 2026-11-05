@@ -21,6 +21,7 @@ AMFI_HISTORY_DOWNLOAD_URL = 'https://portal.amfiindia.com/DownloadNAVHistoryRepo
 AMFI_HISTORY_URL = 'https://www.amfiindia.com/api/nav-history'
 AMFI_TER_URL = 'https://www.amfiindia.com/api/populate-te-rdata-revised'
 AMFI_TER_PAGE_URL = 'https://www.amfiindia.com/ter-of-mf-schemes'
+AMFI_DISCLOSURE_DIRECTORY_URL = 'https://www.amfiindia.com/online-center/portfolio-disclosure'
 AMFI_AUM_URL = 'https://portal.amfiindia.com/AUMReport_Rpt_Po.aspx'
 MFAPI_URL = 'https://api.mfapi.in/mf'
 HEADERS = {'User-Agent': 'MNS-Fund-Analyzer/1.0', 'Accept': '*/*'}
@@ -291,6 +292,29 @@ def _ter_amc_ids() -> dict[str, str]:
         return ids
 
     return _cached_provider_value('fund-analyzer:amfi:ter-amc-ids', load, ttl=604800, stale_ttl=2592000)
+
+
+def fetch_amfi_disclosure_directory() -> dict[str, str]:
+    """AMFI's official list of each AMC's monthly portfolio page, keyed by AMFI AMC name.
+
+    AMFI links out to the AMCs here. It does not host the holdings files itself.
+    """
+    def load() -> dict[str, str]:
+        page = fetch_url(AMFI_DISCLOSURE_DIRECTORY_URL, timeout=(3, 20), attempts=1).text.replace('\\"', '"')
+        directory = {}
+        for match in re.finditer(r'"amc_monthly_portfolio_disclosure":"([^"]*)"', page):
+            names = re.findall(r'"mf_name":"([^"]+)"', page[page.rfind('{', 0, match.start()):match.start()])
+            if names and match.group(1).startswith('http'):
+                directory[_decode_json_text(names[0])] = _decode_json_text(match.group(1))
+        if not directory:
+            raise ProviderError('AMFI portfolio disclosure directory could not be read')
+        return directory
+
+    return _cached_provider_value('fund-analyzer:amfi:disclosure-directory', load, ttl=604800, stale_ttl=2592000)
+
+
+def _decode_json_text(value: str) -> str:
+    return re.sub(r'\\+u([0-9a-fA-F]{4})', lambda match: chr(int(match.group(1), 16)), value).replace('\\/', '/')
 
 
 def _ter_months() -> list[str]:

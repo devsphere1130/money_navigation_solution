@@ -428,6 +428,13 @@ td.fa-table__fund em {
 
 .fa-pair__columns { display: flex; justify-content: space-between; padding: 12px 0 8px; font-size: 9px; font-weight: 700; letter-spacing: 1px; color: #6b6b6b; }
 .fa-pair__none { margin: 6px 0; font-size: 13px; color: var(--color-gray); }
+.fa-pair__split { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 12px 0 0; }
+.fa-pair__split div { padding: 8px 10px; border: 1px solid var(--fa-border); border-radius: 6px; }
+.fa-pair__split dt { font-size: 9px; font-weight: 700; letter-spacing: 1px; color: #6b6b6b; }
+.fa-pair__split dd { margin: 3px 0 1px; font-size: 14px; font-weight: 700; }
+.fa-pair__split small { font-size: 10px; color: var(--color-gray); }
+.fa-pair__meta { display: block; margin-top: 2px; font-size: 10px; color: var(--color-gray); }
+.fa-pair__units { margin: 10px 0 0; font-size: 11px; line-height: 1.5; color: var(--color-gray); }
 
 .fa-pair__row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 9px 0; border-top: 1px solid var(--fa-border); font-size: 12px; color: #4a5266; }
 
@@ -503,6 +510,7 @@ td.fa-table__fund em {
 .fa-fund__holding > div { flex: 1; min-width: 0; }
 .fa-fund__holding p { display: flex; justify-content: space-between; gap: 12px; margin: 0 0 6px; font-size: 12px; color: var(--color-black); }
 .fa-fund__holding strong { flex-shrink: 0; font-weight: 600; }
+.fa-fund__holding-meta { display: block; margin: -3px 0 6px; font-size: 10px; color: var(--color-gray); }
 .fa-fund__holding i { display: block; height: 3px; border-radius: 2px; background: #f3efe5; }
 .fa-fund__holding b { display: block; height: 100%; border-radius: 2px; background: var(--fa-navy); }
 

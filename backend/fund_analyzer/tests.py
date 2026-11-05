@@ -15,9 +15,11 @@ from rest_framework.test import APIClient
 
 from .analytics import cagr, max_drawdown, sharpe, volatility
 from .holdings import AMC_SOURCES, _asset_allocation, _benchmark_from_frame, _clean_holding_name, _common_holdings, _monthly_files_for_fund, _sector_allocation, _read_equity_holdings, analyze_holdings_overlap, calculate_overlap, fetch_fund_holdings, import_portfolio_holdings
+from .adapters import is_official_url
 from .providers import ProviderError, _aum_quarters, fetch_amfi_aum, fetch_amfi_ter_snapshot
 from .riskometer import RISK_LEVELS, read_risk_level, read_scheme_riskometer
 from .services import compare_funds
+from .tests_pipeline import PortfolioCacheMixin
 
 
 class AnalyticsTests(unittest.TestCase):
@@ -245,7 +247,7 @@ class AmfiAumTests(SimpleTestCase):
             self.assertEqual(_aum_quarters(), [(date(2025, 10, 1), date(2025, 12, 31)), (date(2025, 7, 1), date(2025, 9, 30))])
 
 
-class FundHoldingsTests(unittest.TestCase):
+class FundHoldingsTests(PortfolioCacheMixin, SimpleTestCase):
     RECORD = {'scheme_code': '1', 'scheme_name': 'Sample Fund', 'amc': 'HDFC Mutual Fund', 'category': 'Equity Scheme - Flexi Cap Fund'}
 
     def _holdings(self, record, loader):
@@ -286,6 +288,7 @@ class FundHoldingsTests(unittest.TestCase):
                 {'name': 'Petroleum Products', 'weight': 3.46},
                 {'name': 'Others', 'weight': 2.0},
             ],
+            'asset_class': 'equity',
             'riskometer': {'level': 'Moderately High', 'as_of': '2026-09-30', 'source': 'Official AMC Disclosure'},
         })
 
@@ -332,13 +335,12 @@ class FundHoldingsTests(unittest.TestCase):
         ):
             self.assertEqual(_benchmark_from_frame(pd.DataFrame([[text]])), expected)
 
-    def test_no_valid_month_or_debt_fund_returns_nothing(self):
+    def test_no_valid_month_returns_nothing(self):
         def loader(*_args):
             raise ProviderError('Bad file')
 
-        empty = {'holdings': [], 'holdings_as_of': None, 'benchmark': None, 'allocation': None, 'sectors': [], 'riskometer': None}
+        empty = {'holdings': [], 'holdings_as_of': None, 'benchmark': None, 'allocation': None, 'sectors': [], 'riskometer': None, 'asset_class': 'equity'}
         self.assertEqual(self._holdings(self.RECORD, loader), empty)
-        self.assertEqual(fetch_fund_holdings('1', {**self.RECORD, 'category': 'Debt Scheme - Liquid Fund'}), empty)
         self.assertEqual(fetch_fund_holdings('1', None), empty)
 
     def test_fundamentals_endpoint_returns_holdings_and_survives_their_failure(self):
@@ -458,7 +460,7 @@ class RiskometerTests(unittest.TestCase):
         self.assertIsNone(diagnostics['risk_level'])
 
 
-class HoldingsOverlapTests(unittest.TestCase):
+class HoldingsOverlapTests(PortfolioCacheMixin, SimpleTestCase):
     @staticmethod
     def _portfolio_file(fund_name, rows, reporting_date='2026-09-30'):
         workbook = Workbook()
@@ -505,10 +507,25 @@ class HoldingsOverlapTests(unittest.TestCase):
         self.assertEqual(links[1]['url'], 'https://files.hdfcfund.com/s3fs-public/2026-10/Monthly%20HDFC%20Flexi%20Cap%20Fund%20-%2030%20September%202026.xlsx')
         self.assertEqual(links[1]['listing_error'], '403 Forbidden')
 
-    def test_unverified_hdfc_file_name_does_not_create_download_urls(self):
-        with patch('fund_analyzer.holdings._load_page_links', side_effect=ProviderError('403 Forbidden')):
-            with self.assertRaisesRegex(ProviderError, '403 Forbidden'):
-                _monthly_files_for_fund(AMC_SOURCES['HDFC Mutual Fund'], 'Unknown HDFC Fund')
+    def test_any_hdfc_scheme_gets_a_limited_set_of_candidates_when_listing_is_forbidden(self):
+        months = {'2026-10', '2026-09', '2026-08'}
+        with (
+            patch('fund_analyzer.holdings._load_page_links', side_effect=ProviderError('403 Forbidden')),
+            patch('fund_analyzer.holdings._recent_portfolio_months', return_value=months),
+        ):
+            links = _monthly_files_for_fund(AMC_SOURCES['HDFC Mutual Fund'], 'HDFC Large Cap Fund')
+            shouting = _monthly_files_for_fund(AMC_SOURCES['HDFC Mutual Fund'], 'HDFC DIVIDEND YIELD FUND')
+        self.assertEqual(len(links), 3)
+        self.assertTrue(all(link['guessed'] for link in links))
+        self.assertIn('Monthly%20HDFC%20Large%20Cap%20Fund%20-%2030%20September%202026.xlsx', links[1]['url'])
+        self.assertEqual(len(shouting), 6)
+        self.assertIn('HDFC%20Dividend%20Yield%20Fund', shouting[1]['url'])
+        self.assertTrue(all(is_official_url(link['url'], ['hdfcfund.com']) for link in links))
+
+    def test_hdfc_file_that_does_not_name_the_scheme_is_rejected(self):
+        payload = self._portfolio_file('HDFC Mid Cap Fund', [('INE040A01034', 5.0)])
+        with self.assertRaisesRegex(ProviderError, 'No sheet matched'):
+            _read_equity_holdings(payload, 'large.xlsx', 'HDFC Large Cap Fund', 'hdfc_xlsx_by_scheme')
 
     def test_csv_disclosure_excludes_non_equity_rows(self):
         payload = (
@@ -706,8 +723,8 @@ class HoldingsOverlapTests(unittest.TestCase):
         self.assertEqual(endpoint_response.status_code, 200)
         self.assertEqual(endpoint_response.data['highest_overlap']['percentage'], 9.0)
         self.assertEqual(result['pairs'][0]['common_holdings'], [
-            {'isin': 'INE040A01034', 'name': 'Stock', 'left_weight': 5.0, 'right_weight': 7.0},
-            {'isin': 'INE090A01021', 'name': 'Stock', 'left_weight': 4.0, 'right_weight': 6.0},
+            {'isin': 'INE040A01034', 'name': 'Stock', 'left_weight': 5.0, 'right_weight': 7.0, 'overlap_weight': 5.0, 'security_class': 'equity'},
+            {'isin': 'INE090A01021', 'name': 'Stock', 'left_weight': 4.0, 'right_weight': 6.0, 'overlap_weight': 4.0, 'security_class': 'equity'},
         ])
         self.assertTrue(all('holding_names' not in item for item in result['debug']))
 
@@ -770,7 +787,7 @@ class HoldingsOverlapTests(unittest.TestCase):
         self.assertTrue(result['highest_overlap']['available'])
         self.assertEqual(result['highest_overlap']['percentage'], 0.0)
 
-    def test_debt_fund_returns_not_applicable_message(self):
+    def test_debt_fund_without_files_says_holdings_unavailable(self):
         records = [
             {'scheme_code': '1', 'scheme_name': 'Bond Fund', 'amc': 'SBI Mutual Fund', 'category': 'Debt Scheme - Corporate Bond Fund'},
             {'scheme_code': '2', 'scheme_name': 'Equity Fund', 'amc': 'HDFC Mutual Fund', 'category': 'Equity Scheme - Flexi Cap Fund'},
@@ -782,7 +799,7 @@ class HoldingsOverlapTests(unittest.TestCase):
         ):
             result = analyze_holdings_overlap(['1', '2'])
         self.assertFalse(result['highest_overlap']['available'])
-        self.assertEqual(result['highest_overlap']['message'], 'Overlap not applicable for debt funds')
+        self.assertEqual(result['highest_overlap']['message'], 'Holdings unavailable')
 
     def test_missing_holdings_are_excluded_and_coverage_is_partial(self):
         result = self._analyze({

@@ -60,6 +60,7 @@ class FundDetailSerializer(SourceSerializer):
     allocation = serializers.DictField(allow_null=True, required=False)
     sectors = serializers.ListField(child=serializers.DictField(), required=False)
     riskometer = serializers.DictField(allow_null=True, required=False)
+    asset_class = serializers.CharField(allow_null=True, required=False)
     metrics = MetricSetSerializer(allow_null=True, required=False)
 
 

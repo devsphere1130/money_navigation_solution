@@ -1,4 +1,6 @@
 import os
+import sys
+import tempfile
 from datetime import timedelta
 from pathlib import Path
 
@@ -86,6 +88,15 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 CORS_ALLOWED_ORIGINS = [o.strip() for o in os.getenv('CORS_ALLOWED_ORIGINS', 'http://localhost:5173').split(',') if o.strip()]
 FUND_ANALYZER_RISK_FREE_RATE = float(os.getenv('FUND_ANALYZER_RISK_FREE_RATE', '0.065'))
+FUND_ANALYZER_PORTFOLIO_LOOKBACK_MONTHS = max(1, int(os.getenv('FUND_ANALYZER_PORTFOLIO_LOOKBACK_MONTHS', '6')))
+# Verified holdings are JSON files here, not database rows. Vercel can only write to
+# its temporary folder, which is wiped between runs, so set this on a server with a disk.
+FUND_ANALYZER_HOLDINGS_CACHE_DIR = os.getenv('FUND_ANALYZER_HOLDINGS_CACHE_DIR') or str(
+    Path(tempfile.gettempdir()) / 'mns-portfolio-cache' if os.getenv('VERCEL') else BASE_DIR / 'portfolio_cache'
+)
+if 'test' in sys.argv:
+    # Tests must never touch the real cache.
+    FUND_ANALYZER_HOLDINGS_CACHE_DIR = tempfile.mkdtemp(prefix='mns-test-portfolio-cache-')
 
 REDIS_URL = os.getenv('REDIS_URL')
 if REDIS_URL:
@@ -113,6 +124,11 @@ else:
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': ('rest_framework_simplejwt.authentication.JWTAuthentication',),
     'DEFAULT_PERMISSION_CLASSES': ('rest_framework.permissions.IsAuthenticated',),
+    'DEFAULT_THROTTLE_RATES': {
+        'fund_read': '120/min',
+        'fund_analysis': '30/min',
+        'fund_import': '30/hour',
+    },
 }
 
 SIMPLE_JWT = {
