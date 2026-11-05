@@ -281,6 +281,7 @@ class FundHoldingsTests(PortfolioCacheMixin, SimpleTestCase):
                 {'isin': 'US0231351067', 'name': 'US0231351067', 'weight': 2.0},
             ],
             'holdings_as_of': '2026-09-30',
+            'holdings_source': 'official_amc',
             'benchmark': 'NIFTY 500 TRI',
             'allocation': {'indian_equity': 10.46, 'international_equity': 2.0, 'other': 87.54},
             'sectors': [

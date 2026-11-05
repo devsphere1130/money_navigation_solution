@@ -89,6 +89,13 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 CORS_ALLOWED_ORIGINS = [o.strip() for o in os.getenv('CORS_ALLOWED_ORIGINS', 'http://localhost:5173').split(',') if o.strip()]
 FUND_ANALYZER_RISK_FREE_RATE = float(os.getenv('FUND_ANALYZER_RISK_FREE_RATE', '0.065'))
 FUND_ANALYZER_PORTFOLIO_LOOKBACK_MONTHS = max(1, int(os.getenv('FUND_ANALYZER_PORTFOLIO_LOOKBACK_MONTHS', '6')))
+# Backup holdings source: Charlie Alpha, an independent third-party API. OFF unless switched on, because
+# its terms say "education and research" and grant no commercial redistribution rights. Turn it on only
+# after permission and accuracy have been verified. The official AMC reader works the same either way.
+FUND_ANALYZER_CHARLIE_ALPHA_ENABLED = os.getenv('FUND_ANALYZER_CHARLIE_ALPHA_ENABLED', 'false').strip().lower() in ('1', 'true', 'yes', 'on')
+FUND_ANALYZER_CHARLIE_ALPHA_URL = os.getenv('FUND_ANALYZER_CHARLIE_ALPHA_URL', 'https://api.charliealpha.in/v1').rstrip('/')
+# Upper bound on backup requests for one Update Analysis, so a large selection cannot flood the provider.
+FUND_ANALYZER_CHARLIE_ALPHA_MAX_REQUESTS = max(1, int(os.getenv('FUND_ANALYZER_CHARLIE_ALPHA_MAX_REQUESTS', '40')))
 # Verified holdings are JSON files here, not database rows. Vercel can only write to
 # its temporary folder, which is wiped between runs, so set this on a server with a disk.
 FUND_ANALYZER_HOLDINGS_CACHE_DIR = os.getenv('FUND_ANALYZER_HOLDINGS_CACHE_DIR') or str(

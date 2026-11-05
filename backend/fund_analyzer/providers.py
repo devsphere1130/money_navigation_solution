@@ -149,7 +149,7 @@ def parse_amfi_text_data(text: str) -> list[dict[str, Any]]:
             if value <= 0:
                 continue
             records.append({
-                'scheme_code': code, 'isin': _clean(isin_growth) or _clean(isin_reinvest),
+                'scheme_code': code, 'isin': _clean(isin_growth) or _clean(isin_reinvest), 'isin_reinvest': _clean(isin_reinvest),
                 'scheme_name': name, 'plan': _clean(plan), 'option': _clean(option), 'nav': value,
                 'date': nav_date, 'amc': amc, 'scheme_type': scheme_type, 'category': category,
             })
@@ -278,8 +278,36 @@ def parse_mfapi(payload: dict[str, Any], scheme_code: str) -> tuple[dict[str, An
             continue
     if not rows:
         raise ProviderError(f'MFAPI returned no NAV history for scheme {scheme_code}')
-    info = {'scheme_code': scheme_code, 'scheme_name': meta.get('scheme_name'), 'amc': meta.get('fund_house'), 'category': meta.get('scheme_category'), 'isin': meta.get('isin_div_payout'), 'plan': None, 'option': None}
+    plan, option = infer_plan_option(meta.get('scheme_name'))
+    info = {'scheme_code': scheme_code, 'scheme_name': meta.get('scheme_name'), 'amc': meta.get('fund_house'), 'category': meta.get('scheme_category'), 'isin': meta.get('isin_div_payout'), 'plan': plan, 'option': option}
     return info, sorted(rows, key=lambda row: row['date'])
+
+
+def infer_plan_option(name: Any) -> tuple[str | None, str | None]:
+    """Plan (Direct or Regular) and option (Growth or IDCW) as a scheme's own name states them.
+
+    Each plan and option has its own scheme code and its own NAV history, so a name that
+    says Regular IDCW is not the Direct Growth fund. None means the name does not say.
+    """
+    text = str(name or '').lower()
+    plan = 'Direct Plan' if re.search(r'\bdirect\b', text) else 'Regular Plan' if re.search(r'\bregular\b', text) else None
+    option = 'IDCW' if re.search(r'idcw|dividend|payout|reinvest', text) else 'Growth' if re.search(r'\bgrowth\b', text) else None
+    return plan, option
+
+
+def plan_option_conflict(first: dict[str, Any], second: dict[str, Any]) -> str | None:
+    """Describe a disagreement between two records of one scheme code, or None if they agree or one is silent."""
+    def read(record: dict[str, Any]) -> tuple[str | None, str | None]:
+        # The structured field when the source has one, else what the name says.
+        from_fields = infer_plan_option(f"{record.get('plan') or ''} {record.get('option') or ''}")
+        from_name = infer_plan_option(record.get('scheme_name'))
+        return from_fields[0] or from_name[0], from_fields[1] or from_name[1]
+
+    one, two = read(first), read(second)
+    for index, label in enumerate(('plan', 'option')):
+        if one[index] and two[index] and one[index] != two[index]:
+            return f'{label} differs between sources ({one[index]} and {two[index]})'
+    return None
 
 
 def _ter_amc_ids() -> dict[str, str]:

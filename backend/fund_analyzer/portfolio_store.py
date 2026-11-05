@@ -42,6 +42,8 @@ logger = logging.getLogger(__name__)
 
 SOURCE_DOWNLOAD = 'download'
 SOURCE_IMPORT = 'import'
+# Data from an independent third-party API. Never presented as AMC data, and never allowed to replace it.
+SOURCE_CHARLIE = 'charlie_alpha'
 VERIFIED = 'VERIFIED'
 SCHEMA_VERSION = 1
 ISIN_PATTERN = re.compile(r'^[A-Z]{2}[A-Z0-9]{9}[0-9]$')
@@ -49,6 +51,10 @@ MONTH_FILE = re.compile(r'^(\d{4}-(?:0[1-9]|1[0-2]))\.json$')
 ASSET_EQUITY = 'equity'
 ASSET_DEBT = 'debt'
 ASSET_HYBRID = 'hybrid'
+# A Fund of Funds is compared on the mutual fund units it holds. Those rows carry
+# security class ASSET_FUND_UNIT, so they can never enter an equity or debt overlap.
+ASSET_FOF = 'fof'
+ASSET_FUND_UNIT = 'fund_unit'
 MAX_EQUITY_WEIGHT = 101
 # Debt schemes can hold slightly over 100% when net current assets are negative.
 MAX_DEBT_WEIGHT = 115
@@ -141,7 +147,9 @@ def _valid_snapshot(payload: dict[str, Any] | None, month: str) -> bool:
         if not isinstance(row, dict) or not ISIN_PATTERN.match(str(row.get('isin'))):
             return False
         weight = row.get('weight')
-        if not isinstance(weight, (int, float)) or isinstance(weight, bool) or not 0 <= weight <= 100:
+        # A Fund of Funds holding one fund can show a little over 100% when net current assets are negative.
+        limit = MAX_DEBT_WEIGHT if row.get('security_class') == ASSET_FUND_UNIT else 100
+        if not isinstance(weight, (int, float)) or isinstance(weight, bool) or not 0 <= weight <= limit:
             return False
         total += weight
         if (row.get('security_class') or default_class) == ASSET_EQUITY:
@@ -173,7 +181,7 @@ def read_snapshot(record: dict[str, Any], month: str) -> dict[str, Any] | None:
     return payload if _valid_snapshot(payload, month) else None
 
 
-def store_snapshot(record: dict[str, Any], code: str, month: str, result: dict[str, Any], *, source_url: str = '', payload: bytes | None = None, source_type: str = SOURCE_DOWNLOAD) -> None:
+def store_snapshot(record: dict[str, Any], code: str, month: str, result: dict[str, Any], *, source_url: str = '', payload: bytes | None = None, source_type: str = SOURCE_DOWNLOAD, validation: dict[str, Any] | None = None) -> None:
     """Save a verified month. A failure here must never stop the holdings being used."""
     file_hash = hashlib.sha256(payload).hexdigest() if payload else ''
     try:
@@ -186,7 +194,9 @@ def store_snapshot(record: dict[str, Any], code: str, month: str, result: dict[s
                 unchanged = file_hash and existing.get('file_hash') == file_hash and same_rows
                 # A download never replaces what staff uploaded on purpose.
                 keep_upload = existing.get('source_type') == SOURCE_IMPORT and source_type == SOURCE_DOWNLOAD
-                if unchanged or keep_upload:
+                # Third-party data never replaces official data for the same month. Official data replaces it.
+                keep_official = source_type == SOURCE_CHARLIE and existing.get('source_type') != SOURCE_CHARLIE
+                if unchanged or keep_upload or keep_official:
                     if codes != existing.get('scheme_codes'):
                         _write_json_atomic(path, {**existing, 'scheme_codes': codes})
                     return
@@ -206,6 +216,7 @@ def store_snapshot(record: dict[str, Any], code: str, month: str, result: dict[s
                 'source_url': (source_url or '')[:1000],
                 'file_hash': file_hash,
                 'validation_status': VERIFIED,
+                **({'third_party': True, 'validation': validation or {}} if source_type == SOURCE_CHARLIE else {}),
                 'benchmark': result.get('benchmark') or '',
                 'risk_level': result.get('risk_level') or '',
                 **({'other_holdings': result['other_holdings']} if result.get('other_holdings') else {}),
@@ -249,6 +260,8 @@ def stored_links(record: dict[str, Any]) -> list[dict[str, Any]]:
                 'month': match.group(1),
                 'portfolio_date': snapshot['reporting_date'],
                 'stored': True,
+                # Lets callers try official sources first within a month.
+                'third_party': snapshot.get('source_type') == SOURCE_CHARLIE,
             })
     return links
 
@@ -268,6 +281,9 @@ def load_snapshot(snapshot_id: str) -> dict[str, Any]:
         'classes_read': (payload or {}).get('classes_read') or [ASSET_DEBT if (payload or {}).get('asset_class') == ASSET_DEBT else ASSET_EQUITY],
         'unclassified_weight': (payload or {}).get('unclassified_weight'),
         'source_url': (payload or {}).get('source_url') or '',
+        'source_type': (payload or {}).get('source_type') or SOURCE_DOWNLOAD,
+        'validation': (payload or {}).get('validation') or None,
+        'imported_at': (payload or {}).get('imported_at'),
         'benchmark': (payload or {}).get('benchmark') or None,
         'risk_level': (payload or {}).get('risk_level') or None,
         'portfolio_date': (payload or {}).get('reporting_date'),

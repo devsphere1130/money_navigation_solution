@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { LineChart, Search, Trash2, X } from 'lucide-react';
-import { MAX_FUNDS, FUND_COLORS } from '../fundData.js';
+import { fundColor } from '../fundData.js';
 import { searchFunds } from '../../../services/fundAnalyzerService.js';
 
 export default function FundPicker({ selectedFunds, onChange, onClear, onUpdate, loading }) {
@@ -20,7 +20,7 @@ export default function FundPicker({ selectedFunds, onChange, onClear, onUpdate,
   }, [query]);
 
   const addFund = (fund) => {
-    if (selectedFunds.some((item) => item.scheme_code === fund.scheme_code) || selectedFunds.length >= MAX_FUNDS) return;
+    if (selectedFunds.some((item) => item.scheme_code === fund.scheme_code)) return;
     onChange([...selectedFunds, fund]);
     setQuery('');
   };
@@ -40,15 +40,15 @@ export default function FundPicker({ selectedFunds, onChange, onClear, onUpdate,
           {!searching && results.length === 0 && <p className="fa-search__none">No AMFI schemes match this search.</p>}
           {results.map((fund) => {
             const added = selectedFunds.some((item) => item.scheme_code === fund.scheme_code);
-            return <button key={`${fund.scheme_code}-${fund.isin || ''}`} type="button" className="fa-search__row" disabled={added || selectedFunds.length >= MAX_FUNDS} onMouseDown={(e) => e.preventDefault()} onClick={() => addFund(fund)}>
+            return <button key={`${fund.scheme_code}-${fund.isin || ''}`} type="button" className="fa-search__row" disabled={added} onMouseDown={(e) => e.preventDefault()} onClick={() => addFund(fund)}>
               <span><strong>{fund.scheme_name}</strong><small>{fund.amc || 'AMFI'} · {fund.category || 'Category unavailable'} · {fund.scheme_code}{added ? ' · Added' : ''}</small></span>
               <span className="fa-search__cagr"><strong>{fund.nav == null ? '—' : `₹${fund.nav}`}</strong><small>LIVE NAV</small></span>
             </button>;
           })}
         </div>}
       </div>
-      {selectedFunds.length > 0 && <ul className="fa-chips">{selectedFunds.map((fund, i) => <li key={fund.scheme_code} className="fa-chip"><i style={{ background: FUND_COLORS[i] }} /><strong>{fund.scheme_name}</strong><small>{fund.scheme_code}</small><button type="button" aria-label={`Remove ${fund.scheme_name}`} onClick={() => onChange(selectedFunds.filter((item) => item.scheme_code !== fund.scheme_code))}><X size={13} /></button></li>)}</ul>}
-      <div className="fa-picker__foot"><div className="fa-picker__count"><span className="fa-picker__bar"><i style={{ width: `${(selectedFunds.length / MAX_FUNDS) * 100}%` }} /></span>{selectedFunds.length} / {MAX_FUNDS} funds selected</div><button type="button" className="fa-picker__update" disabled={!selectedFunds.length || loading} onClick={onUpdate}><LineChart size={15} /> {loading ? 'Loading live data…' : 'Update analysis'}</button></div>
+      {selectedFunds.length > 0 && <ul className="fa-chips">{selectedFunds.map((fund, i) => <li key={fund.scheme_code} className="fa-chip"><i style={{ background: fundColor(i) }} /><strong>{fund.scheme_name}</strong><small>{fund.scheme_code}</small><button type="button" aria-label={`Remove ${fund.scheme_name}`} onClick={() => onChange(selectedFunds.filter((item) => item.scheme_code !== fund.scheme_code))}><X size={13} /></button></li>)}</ul>}
+      <div className="fa-picker__foot"><div className="fa-picker__count">{selectedFunds.length} {selectedFunds.length === 1 ? 'fund' : 'funds'} selected</div><button type="button" className="fa-picker__update" disabled={!selectedFunds.length || loading} onClick={onUpdate}><LineChart size={15} /> {loading ? 'Loading live data…' : 'Update analysis'}</button></div>
     </section>
   );
 }

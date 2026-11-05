@@ -5,8 +5,8 @@ import SummaryCards from './components/SummaryCards.jsx';
 import CompareTab from './components/CompareTab.jsx';
 import OverlapTab from './components/OverlapTab.jsx';
 import FundamentalsTab from './components/FundamentalsTab.jsx';
-import { FUND_COLORS } from './fundData.js';
-import { compareFunds, getFundamentals, getHoldingsOverlap } from '../../services/fundAnalyzerService.js';
+import { fundColor } from './fundData.js';
+import { compareFunds, getFundamentals, getHoldingsOverlapWithProgress } from '../../services/fundAnalyzerService.js';
 import './FundAnalyzerPage.css';
 
 const TABS = [
@@ -29,21 +29,29 @@ export default function FundAnalyzerPage() {
   const [fundamentalsError, setFundamentalsError] = useState('');
   const [overlap, setOverlap] = useState(null);
   const [overlapLoading, setOverlapLoading] = useState(false);
+  const [overlapStage, setOverlapStage] = useState('');
   const overlapRequest = useRef(0);
+
+  const loadOverlap = (schemeCodes, portfolioMonth) => {
+    const requestId = ++overlapRequest.current;
+    const current = () => overlapRequest.current === requestId;
+    setOverlap(null);
+    setOverlapStage('Fetching portfolio holdings...');
+    setOverlapLoading(true);
+    getHoldingsOverlapWithProgress(schemeCodes, portfolioMonth, (message) => { if (current()) setOverlapStage(message); }, () => !current())
+      .then((payload) => { if (current() && payload) setOverlap(payload); })
+      // Say why, never a figure: the message is the server's own reason.
+      .catch((err) => { if (current()) setOverlap({ available: false, funds: [], highest_pair: null, highest_overlap: { available: false, percentage: null, message: err.message || 'Portfolio holdings unavailable' } }); })
+      .finally(() => { if (current()) setOverlapLoading(false); });
+  };
 
   const load = async () => {
     setLoading(true); setError('');
     const schemeCodes = selectedFunds.map((fund) => fund.scheme_code);
-    const requestId = ++overlapRequest.current;
-    setOverlap(null);
-    setOverlapLoading(true);
-    getHoldingsOverlap(schemeCodes)
-      .then((payload) => { if (overlapRequest.current === requestId) setOverlap(payload); })
-      .catch(() => { if (overlapRequest.current === requestId) setOverlap({ available: false, funds: [], highest_pair: null }); })
-      .finally(() => { if (overlapRequest.current === requestId) setOverlapLoading(false); });
+    loadOverlap(schemeCodes);
     try {
       const payload = await compareFunds(schemeCodes);
-      setFunds((payload.funds || []).map((fund, index) => ({ ...fund, color: FUND_COLORS[index] })));
+      setFunds((payload.funds || []).map((fund, index) => ({ ...fund, color: fundColor(index) })));
       setSource(payload.source || 'AMFI'); setAsOfDate(payload.asOfDate || null); setRiskFreeRate(payload.summary?.riskFreeRate ?? 0.065);
     } catch (err) { setError(err.message || 'Unable to load live fund data.'); }
     finally { setLoading(false); }
@@ -80,10 +88,10 @@ export default function FundAnalyzerPage() {
     })
     : funds;
   return <div className="fa">
-    <header className="fa__header"><div><p className="fa__eyebrow"><i /> LIVE {source}</p><h1>Fund Analyzer</h1><p className="fa__sub">Compare live AMFI NAV history, returns, risk, holdings overlap and published fund metadata for up to 8 schemes.</p></div><div className="fa__actions"><button type="button" className="fa__action" onClick={() => window.print()}><Printer size={15} /> Print report</button></div></header>
+    <header className="fa__header"><div><p className="fa__eyebrow"><i /> LIVE {source}</p><h1>Fund Analyzer</h1><p className="fa__sub">Compare live AMFI NAV history, returns, risk, holdings overlap and published fund metadata for the schemes you select.</p></div><div className="fa__actions"><button type="button" className="fa__action" onClick={() => window.print()}><Printer size={15} /> Print report</button></div></header>
     <FundPicker selectedFunds={selectedFunds} onChange={setSelectedFunds} onClear={() => { overlapRequest.current += 1; setSelectedFunds([]); setFunds([]); setFundMetadata({}); setOverlap(null); setOverlapLoading(false); }} onUpdate={load} loading={loading} />
     {error && <p className="fa-notice" role="alert">{error}</p>}
-    {!funds.length && !loading ? <p className="fa-card fa__empty">Select AMFI schemes and press Update analysis to load live figures.</p> : <>{funds.length > 0 && <><SummaryCards funds={funds} overlap={overlap} overlapLoading={overlapLoading} /><div className="fa__tabbar"><nav className="fa__tabs" role="tablist">{TABS.map(({ key, label, icon: Icon }) => <button key={key} type="button" role="tab" aria-selected={activeTab === key} className={`fa__tab${activeTab === key ? ' fa__tab--active' : ''}`} onClick={() => setActiveTab(key)}><Icon size={15} /> {label}</button>)}</nav><span className="fa__navdate">{source} as of {asOfDate || '—'}</span></div><Component funds={displayedFunds} overlap={overlap} overlapLoading={overlapLoading} riskFreeRate={riskFreeRate} loading={fundamentalsLoading} error={fundamentalsError} /></>}</>}
+    {!funds.length && !loading ? <p className="fa-card fa__empty">Select AMFI schemes and press Update analysis to load live figures.</p> : <>{funds.length > 0 && <><SummaryCards funds={funds} overlap={overlap} overlapLoading={overlapLoading} overlapStage={overlapStage} /><div className="fa__tabbar"><nav className="fa__tabs" role="tablist">{TABS.map(({ key, label, icon: Icon }) => <button key={key} type="button" role="tab" aria-selected={activeTab === key} className={`fa__tab${activeTab === key ? ' fa__tab--active' : ''}`} onClick={() => setActiveTab(key)}><Icon size={15} /> {label}</button>)}</nav><span className="fa__navdate">{source} as of {asOfDate || '—'}</span></div><Component funds={displayedFunds} overlap={overlap} overlapLoading={overlapLoading} overlapStage={overlapStage} onHistoricalMonth={(month) => loadOverlap(funds.map((fund) => fund.scheme_code), month)} riskFreeRate={riskFreeRate} loading={fundamentalsLoading} error={fundamentalsError} /></>}</>}
     <p className="fa__disclaimer">Mutual fund investments are subject to market risks; read all scheme-related documents carefully. Past performance may or may not be sustained in future.</p>
   </div>;
 }

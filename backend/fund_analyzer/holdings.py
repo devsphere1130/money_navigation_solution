@@ -7,9 +7,9 @@ from datetime import date, datetime, timedelta
 from html.parser import HTMLParser
 from io import BytesIO
 from threading import Lock
-from typing import Any
+from typing import Any, Callable
 import zipfile
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import unquote, urljoin, urlsplit
 
 import pandas as pd
 import requests
@@ -38,7 +38,8 @@ from .adapters import (
     portfolio_date as _portfolio_date,
     source_for_amc,
 )
-from .portfolio_store import ASSET_DEBT, ASSET_EQUITY, ASSET_HYBRID, ISIN_PATTERN, MAX_DEBT_WEIGHT, SOURCE_IMPORT, discovery_due, file_scheme_name, load_snapshot, record_status, source_status, store_snapshot, stored_links
+from . import charlie_alpha
+from .portfolio_store import ASSET_DEBT, ASSET_EQUITY, ASSET_FOF, ASSET_FUND_UNIT, ASSET_HYBRID, ISIN_PATTERN, MAX_DEBT_WEIGHT, SOURCE_CHARLIE, SOURCE_IMPORT, discovery_due, file_scheme_name, load_snapshot, record_status, source_status, store_snapshot, stored_links
 from .providers import HEADERS, ProviderError, fetch_amfi_latest, fetch_url
 from .riskometer import read_scheme_riskometer
 
@@ -55,24 +56,43 @@ REASON_NO_COMMON_SECURITIES = 'NO_COMMON_SECURITIES'
 REASON_HOLDINGS_UNAVAILABLE = 'HOLDINGS_UNAVAILABLE'
 REASON_PARSER_UNSUPPORTED = 'PARSER_UNSUPPORTED'
 REASON_NO_COMMON_MONTH = 'NO_COMMON_REPORTING_MONTH'
+REASON_NO_COMMON_FUNDS = 'NO_COMMON_UNDERLYING_FUNDS'
+REASON_FOF_LOOKTHROUGH = 'FOF_LOOKTHROUGH_UNAVAILABLE'
+REASON_HISTORICAL_UNAVAILABLE = 'HISTORICAL_HOLDINGS_UNAVAILABLE'
+REASON_SOURCE_NOT_SUPPORTED = 'SOURCE_NOT_SUPPORTED'
+REASON_FILE_UNAVAILABLE = 'OFFICIAL_FILE_UNAVAILABLE'
+REASON_DOWNLOAD_BLOCKED = 'DOWNLOAD_BLOCKED'
+REASON_SCHEME_NOT_IN_FILES = 'SCHEME_NOT_IN_OFFICIAL_FILES'
 REASON_MESSAGES = {
+    REASON_SCHEME_NOT_IN_FILES: 'Scheme not found in the AMC published portfolio files',
+    REASON_FILE_UNAVAILABLE: 'Official file unavailable',
+    REASON_DOWNLOAD_BLOCKED: 'Download blocked by the AMC website',
+    REASON_HISTORICAL_UNAVAILABLE: 'Historical portfolio unavailable',
+    REASON_SOURCE_NOT_SUPPORTED: 'Portfolio source not supported',
     REASON_NO_COMMON_SECURITIES: 'No common securities',
     REASON_HOLDINGS_UNAVAILABLE: 'Holdings unavailable',
     REASON_PARSER_UNSUPPORTED: 'Parser unsupported',
     REASON_NO_COMMON_MONTH: 'No common reporting month',
+    REASON_NO_COMMON_FUNDS: 'No common underlying funds',
+    REASON_FOF_LOOKTHROUGH: 'Look-through overlap is unavailable for a Fund of Funds. Only two Funds of Funds can be compared, on the fund units they hold.',
 }
 # The kinds of security each fund type is compared on. A pair uses what both share.
 FUND_SECURITY_CLASSES = {
     ASSET_EQUITY: {ASSET_EQUITY},
     ASSET_DEBT: {ASSET_DEBT},
     ASSET_HYBRID: {ASSET_EQUITY, ASSET_DEBT},
+    ASSET_FOF: {ASSET_FUND_UNIT},
 }
+OVERLAP_DIRECT_FOF = 'DIRECT_FOF'
+OVERLAP_DIRECT_FOF_LABEL = 'Direct FoF Overlap'
+OVERLAP_SECURITIES = 'SECURITIES'
 # Above this share of NAV, unclassified rows are reported instead of being ignored.
 MATERIAL_UNCLASSIFIED_WEIGHT = 1
 PARSED_HOLDINGS_CACHE_SECONDS = 180 * 24 * 60 * 60
 PORTFOLIO_CACHE_MAX_BYTES = 128 * 1024 * 1024
 IMPORTED_HOLDINGS_CACHE_SECONDS = 70 * 24 * 60 * 60
 _download_lock = Lock()
+_file_locks: dict[tuple[str, str, str], Lock] = {}
 _portfolio_file_cache: dict[tuple[str, str], tuple[datetime, dict[str, bytes]]] = {}
 SBI_PORTFOLIO_LIST_URL = 'https://www.sbimf.com/ajaxcall/CMS/GetSchemePortfolioSheets'
 
@@ -144,13 +164,74 @@ def _cache_parsed_holdings(scheme_code: str, reporting_date: str, holdings: dict
         logger.exception('Parsed portfolio cache write failed for scheme %s', scheme_code)
 
 
+# AMFI's older NAV file files closed and some open schemes under one-word categories.
+# 'Income' is its debt category, so a fixed term plan filed there is a debt scheme.
+LEGACY_DEBT_CATEGORIES = {'income', 'gilt', 'liquid', 'money market'}
+LEGACY_HYBRID_CATEGORIES = {'balanced'}
+
+
+def _category(record: dict) -> str:
+    return re.sub(r'\s+', ' ', str(record.get('category') or '')).strip().lower()
+
+
 def _is_debt_fund(record: dict) -> bool:
-    category = re.sub(r'\s+', ' ', str(record.get('category') or '')).strip().lower()
-    return category.startswith(('debt scheme', 'debt fund', 'income/debt'))
+    category = _category(record)
+    return category.startswith(('debt scheme', 'debt fund', 'income/debt')) or category in LEGACY_DEBT_CATEGORIES
 
 
 def _is_hybrid_fund(record: dict) -> bool:
-    return re.sub(r'\s+', ' ', str(record.get('category') or '')).strip().lower().startswith('hybrid')
+    category = _category(record)
+    return category.startswith('hybrid') or category in LEGACY_HYBRID_CATEGORIES
+
+
+# A scheme whose last NAV is older than this has stopped reporting. Its monthly portfolios
+# were published back then, so searching the latest months for it can only fail.
+HISTORICAL_NAV_AGE_DAYS = 120
+SCHEME_ACTIVE = 'ACTIVE'
+SCHEME_MATURED = 'MATURED'
+SCHEME_DISCONTINUED = 'DISCONTINUED'
+_CLOSED_TYPES = {'close', 'closed', 'close ended', 'closed ended', 'close-ended', 'closed-ended'}
+
+
+def _nav_date(value: Any) -> date | None:
+    text = str(value or '').strip()
+    for pattern in ('%d-%b-%Y', '%Y-%m-%d'):
+        try:
+            return datetime.strptime(text[:11], pattern).date()
+        except ValueError:
+            continue
+    return None
+
+
+def scheme_status(record: dict[str, Any] | None, today: date | None = None) -> dict[str, Any]:
+    """Whether a scheme still reports. A closed-ended scheme with an old last NAV has matured.
+
+    This reads AMFI's own scheme type and last NAV date. A record with no NAV date is treated
+    as active, because nothing proves otherwise.
+    """
+    last = _nav_date((record or {}).get('date'))
+    if last is None:
+        return {'status': SCHEME_ACTIVE, 'last_nav_date': None, 'nav_age_days': None}
+    age = ((today or date.today()) - last).days
+    if age <= HISTORICAL_NAV_AGE_DAYS:
+        status = SCHEME_ACTIVE
+    else:
+        status = SCHEME_MATURED if str(record.get('scheme_type') or '').strip().lower() in _CLOSED_TYPES else SCHEME_DISCONTINUED
+    return {'status': status, 'last_nav_date': last.isoformat(), 'nav_age_days': age}
+
+
+def historical_message(names: list[str]) -> str:
+    return f"Historical portfolio unavailable for {', '.join(name for name in names if name)}."
+
+
+def _is_fof_fund(record: dict) -> bool:
+    """A Fund of Funds by the scheme category AMFI publishes, such as 'Other Scheme - FoF Domestic'.
+
+    The scheme's name is never used: plenty of equity and index funds have 'Fund of Funds'
+    in a name without being one, and a name says nothing about what the portfolio holds.
+    """
+    category = re.sub(r'\s+', ' ', str(record.get('category') or '')).strip().lower()
+    return bool(re.search(r'\bfof\b|\bfunds? of funds?\b', category))
 
 
 def _overlap_debug_record(code: str, record: dict | None = None, *, error: str | None = None) -> dict[str, Any]:
@@ -228,6 +309,14 @@ def _sbi_monthly_links() -> list[dict[str, str]]:
     return links
 
 
+_EMBEDDED_EXCEL = re.compile(r'''["'(]((?:https?://|/)[^"'()\s<>]+?\.xlsx?)(?=["')\s?#])''', re.IGNORECASE)
+
+
+def _embedded_excel_paths(page_text: str) -> list[str]:
+    """Excel file paths written inside a page's scripts or data rather than in links."""
+    return list(dict.fromkeys(_EMBEDDED_EXCEL.findall(page_text.replace('\\/', '/'))))
+
+
 def _load_page_links(amc_key: str, page_url: str, parser_key: str) -> list[dict[str, str]]:
     cache_key = f'fund-analyzer:portfolio-page:{amc_key}'
     try:
@@ -259,6 +348,9 @@ def _load_page_links(amc_key: str, page_url: str, parser_key: str) -> list[dict[
             results = []
             domains = official_domains(amc_key)
             seen_urls = set()
+            # Some AMC pages fill their file lists in with JavaScript from data inside the page,
+            # so no <a> tag exists. Read the Excel paths in that data too, under the same rules.
+            parser.links.extend({'href': path, 'text': unquote(path.rsplit('/', 1)[-1])} for path in _embedded_excel_paths(response.text))
             for link in parser.links:
                 href = urljoin(page_url, (link['href'] or '').strip())
                 text = re.sub(r'\s+', ' ', link['text']).strip()
@@ -341,25 +433,42 @@ def _download_portfolio_file(amc_key: str, url: str) -> bytes:
     return payload
 
 
+def _cached_file(key: tuple[str, str], url: str) -> bytes | None:
+    entry = _portfolio_file_cache.get(key)
+    return entry[1][url] if entry and entry[0] > datetime.now() and url in entry[1] else None
+
+
 def _download_cached(amc_key: str, month: str, url: str) -> bytes:
+    """One download per file, however many requests ask at once.
+
+    Each file has its own lock, so a second request for the same file waits for the first and
+    reads its result, while downloads of different files (or AMCs) run side by side.
+    """
     key = (amc_key, month)
     with _download_lock:
-        now = datetime.now()
-        cached_entry = _portfolio_file_cache.get(key)
-        if cached_entry and cached_entry[0] > now and url in cached_entry[1]:
-            return cached_entry[1][url]
-        cached_files = cached_entry[1] if cached_entry and cached_entry[0] > now else {}
-
+        hit = _cached_file(key, url)
+        if hit is not None:
+            return hit
+        file_lock = _file_locks.setdefault((amc_key, month, url), Lock())
+    with file_lock:
+        with _download_lock:
+            hit = _cached_file(key, url)
+            if hit is not None:
+                return hit
         payload = _download_portfolio_file(amc_key, url)
-        cached_files[url] = payload
-        _portfolio_file_cache[key] = (now + timedelta(seconds=PORTFOLIO_CACHE_SECONDS), cached_files)
-        # Bound memory use if a long-lived worker sees many AMC/month pairs.
-        while len(_portfolio_file_cache) > 32:
-            oldest = min(_portfolio_file_cache, key=lambda cache_key: _portfolio_file_cache[cache_key][0])
-            del _portfolio_file_cache[oldest]
-        while sum(len(file_bytes) for _, files in _portfolio_file_cache.values() for file_bytes in files.values()) > PORTFOLIO_CACHE_MAX_BYTES:
-            oldest = min(_portfolio_file_cache, key=lambda cache_key: _portfolio_file_cache[cache_key][0])
-            del _portfolio_file_cache[oldest]
+        with _download_lock:
+            now = datetime.now()
+            entry = _portfolio_file_cache.get(key)
+            cached_files = entry[1] if entry and entry[0] > now else {}
+            cached_files[url] = payload
+            _portfolio_file_cache[key] = (now + timedelta(seconds=PORTFOLIO_CACHE_SECONDS), cached_files)
+            # Bound memory use if a long-lived worker sees many AMC/month pairs.
+            while len(_portfolio_file_cache) > 32:
+                oldest = min(_portfolio_file_cache, key=lambda cache_key: _portfolio_file_cache[cache_key][0])
+                del _portfolio_file_cache[oldest]
+            while sum(len(file_bytes) for _, files in _portfolio_file_cache.values() for file_bytes in files.values()) > PORTFOLIO_CACHE_MAX_BYTES:
+                oldest = min(_portfolio_file_cache, key=lambda cache_key: _portfolio_file_cache[cache_key][0])
+                del _portfolio_file_cache[oldest]
         return payload
 
 
@@ -448,7 +557,7 @@ def _section_for_row(row) -> bool | None:
     return _is_equity_section(' '.join(values)) if len(values) <= 3 else None
 
 
-def _as_weight(value, number_format: str = '') -> float | None:
+def _as_weight(value, number_format: str = '', upper: float = 100) -> float | None:
     try:
         if pd.isna(value):
             return None
@@ -456,7 +565,7 @@ def _as_weight(value, number_format: str = '') -> float | None:
         result = float(raw_value.replace(',', '').replace('%', '').strip())
         if '%' in number_format and '%' not in raw_value:
             result *= 100
-        return result if 0 <= result <= 100 else None
+        return result if 0 <= result <= upper else None
     except (TypeError, ValueError):
         return None
 
@@ -606,13 +715,17 @@ def _locate_holdings_table(
     }
 
 
-def _row_weight(table: dict[str, Any], row: list, row_index: int) -> float | None:
-    """A holding's weight as a percentage of the whole scheme, not of one asset class."""
+def _row_weight(table: dict[str, Any], row: list, row_index: int, upper: float = 100) -> float | None:
+    """A holding's weight as a percentage of the whole scheme, not of one asset class.
+
+    upper is the largest weight accepted. A Fund of Funds holding one fund can show a little
+    over 100% when its net current assets are negative, so its reader raises the limit.
+    """
     weight_at, market_value_at = table['weight_at'], table['market_value_at']
     if weight_at is not None:
         cell_formats = table['cell_formats']
         weight_format = cell_formats[row_index][weight_at] if row_index < len(cell_formats) and weight_at < len(cell_formats[row_index]) else ''
-        return _as_weight(row[weight_at], weight_format)
+        return _as_weight(row[weight_at], weight_format, upper)
     try:
         market_value = float(str(row[market_value_at]).replace(',', '').strip())
         return market_value / table['total_fund_value'] * 100 if market_value >= 0 else None
@@ -706,7 +819,7 @@ CASH_AND_MARGIN = 'Cash & Margin'
 _OTHER_INSTRUMENT_TYPES = (
     (r'alternative investment|corporate debt market', ALTERNATIVE_FUND_UNITS),
     (r'foreign securities', 'Foreign Securities'),
-    (r'mutual fund units|exchange traded', MUTUAL_FUND_UNITS),
+    (r'mutual funds?\b|exchange traded|\betfs?\b', MUTUAL_FUND_UNITS),
     (r'\breits?\b|\binvits?\b|real estate investment trust|infrastructure investment trust', 'REIT / InvIT Units'),
     (r'term deposit', 'Term Deposits'),
     (r'margin|cash', CASH_AND_MARGIN),
@@ -787,17 +900,17 @@ def _debt_issuer(name: str, rating: str, isin: str) -> str | None:
     return issuer or None
 
 
-def _signed_row_weight(table: dict[str, Any], row: list, row_index: int) -> float | None:
+def _signed_row_weight(table: dict[str, Any], row: list, row_index: int, upper: float = 100) -> float | None:
     """Like _row_weight, but keeps a minus sign. Net current assets can be negative."""
     at = table['weight_at'] if table['weight_at'] is not None else table['market_value_at']
     if at >= len(row):
         return None
     raw = '' if pd.isna(row[at]) else str(row[at]).strip()
     if not raw.startswith('-'):
-        return _row_weight(table, row, row_index)
+        return _row_weight(table, row, row_index, upper)
     positive = [*row]
     positive[at] = raw[1:]
-    weight = _row_weight(table, positive, row_index)
+    weight = _row_weight(table, positive, row_index, upper)
     return -weight if weight is not None else None
 
 
@@ -923,7 +1036,111 @@ def _read_debt_holdings(
     return holdings
 
 
+def _read_fund_unit_holdings(
+    payload: bytes,
+    url: str,
+    fund_name: str,
+    parser_key: str,
+    diagnostics: dict[str, Any] | None = None,
+    workbook: tuple[dict[str, pd.DataFrame], dict[str, list[list[str]]]] | None = None,
+) -> dict[str, float]:
+    """Read the mutual fund units a Fund of Funds holds, each as a percentage of its NAV.
+
+    Only rows that are verifiably mutual fund / ETF units count: an INF ISIN (India gives
+    every fund unit that prefix) or a row the file itself places under a mutual fund
+    heading or asset class. Alternative investment funds such as CDMDF are not scheme
+    choices, so they stay visible but are never matched. Repo, cash and net current
+    assets are kept as other holdings, so allocation can add up.
+    """
+    table = _locate_holdings_table(payload, url, fund_name, diagnostics, workbook)
+    frame, isin_at, asset_at = table['frame'], table['isin_at'], table['asset_at']
+    name_at, _ = _name_and_industry_columns(frame, table['header_at'], asset_at)
+
+    holdings: dict[str, float] = {}
+    names: dict[str, str] = {}
+    instrument_types: dict[str, str] = {}
+    others: dict[str, dict[str, Any]] = {}
+    stated: list[tuple[float, float]] = []
+    grand_total: float | None = None
+    section_type: str | None = None
+
+    def add_other(isin: str | None, name: str, weight: float, instrument_type: str) -> None:
+        entry = others.setdefault(isin or f'{instrument_type}|{name}', {
+            **({'isin': isin} if isin else {}), 'name': name, 'weight': 0.0, 'instrument_type': instrument_type,
+        })
+        entry['weight'] += weight
+
+    for row_index in range(table['header_at'] + 1, table['section_end']):
+        row = frame.iloc[row_index].tolist()
+        values = [str(value).strip() for value in row if not pd.isna(value) and str(value).strip()]
+        if values and _GRAND_TOTAL_ROW.match(values[0].lower()):
+            # What follows is notes and summaries, which repeat the labels above.
+            grand_total = _market_value(table, row)
+            break
+        isin = re.sub(r'\s+', '', '' if isin_at >= len(row) or pd.isna(row[isin_at]) else str(row[isin_at])).upper()
+        name = _clean_holding_name(row[name_at]) if name_at is not None and name_at < len(row) else ''
+        if not ISIN_PATTERN.match(isin):
+            heading = _debt_heading(values[0]) if values and len(values) <= 4 else None
+            if heading is not None:
+                section_type = heading[1]
+            if values and not _TOTAL_ROW.match(values[0].lower()):
+                weight = _signed_row_weight(table, row, row_index, MAX_DEBT_WEIGHT)
+                if weight is not None:
+                    add_other(None, name or values[0], weight, _other_instrument_type(' '.join(values)) or section_type or 'Other')
+            continue
+        if table['weight_at'] is not None and table['weight_at'] >= len(row):
+            continue
+        if table['weight_at'] is None and table['market_value_at'] >= len(row):
+            continue
+        weight = _row_weight(table, row, row_index, MAX_DEBT_WEIGHT)
+        if weight is None:
+            continue
+        row_type = section_type
+        if asset_at is not None and asset_at < len(row) and not pd.isna(row[asset_at]) and str(row[asset_at]).strip():
+            row_type = _other_instrument_type(str(row[asset_at])) or row_type
+        row_type = _other_instrument_type(name) if row_type is None else row_type
+        if row_type == ALTERNATIVE_FUND_UNITS:
+            add_other(isin, name or isin, weight, ALTERNATIVE_FUND_UNITS)
+            continue
+        if isin.startswith(FUND_UNIT_ISIN_PREFIX) or row_type == MUTUAL_FUND_UNITS:
+            market_value = _market_value(table, row)
+            if table['weight_at'] is not None and market_value is not None:
+                stated.append((weight, market_value))
+            holdings[isin] = holdings.get(isin, 0.0) + weight
+            names.setdefault(isin, name or isin)
+            instrument_types[isin] = MUTUAL_FUND_UNITS
+            continue
+        add_other(isin, name or isin, weight, row_type or 'Other')
+
+    if not holdings:
+        raise _NoHoldingsFound(f'No mutual fund unit holdings found for {fund_name}')
+    if sum(holdings.values()) > MAX_DEBT_WEIGHT:
+        raise ProviderError(f'Fund unit weights are too high for {fund_name}')
+    # % to NAV must be a share of the same net assets the market values add up to.
+    if grand_total and grand_total > 0 and stated:
+        worst = max(abs(weight - value / grand_total * 100) for weight, value in stated)
+        if worst > MAX_WEIGHT_DIFFERENCE:
+            raise ProviderError(f'Fund unit weights for {fund_name} do not match market value over grand total')
+    other_rows = list(others.values())
+    total = sum(holdings.values()) + sum(entry['weight'] for entry in other_rows)
+    if abs(total - 100) > MAX_TOTAL_DIFFERENCE:
+        logger.warning('Fund of Funds portfolio rows for %s add up to %.2f%%, not 100%%', fund_name, total)
+    if diagnostics is not None:
+        diagnostics['holding_names'] = names
+        diagnostics['holding_industries'] = {}
+        diagnostics['instrument_types'] = instrument_types
+        diagnostics['issuers'] = {}
+        diagnostics['other_holdings'] = other_rows
+        diagnostics['security_classes'] = {isin: ASSET_FUND_UNIT for isin in holdings}
+        diagnostics['classes_read'] = [ASSET_FUND_UNIT]
+        diagnostics['unclassified_weight'] = sum(row['weight'] for row in other_rows if row['instrument_type'] == 'Other')
+    _add_file_details(diagnostics, payload, table, fund_name, holdings)
+    return holdings
+
+
 def _asset_class(record: dict[str, Any] | None) -> str:
+    if record and _is_fof_fund(record):
+        return ASSET_FOF
     if record and _is_debt_fund(record):
         return ASSET_DEBT
     return ASSET_HYBRID if record and _is_hybrid_fund(record) else ASSET_EQUITY
@@ -991,6 +1208,8 @@ def _read_portfolio(asset_class: str, payload: bytes, url: str, fund_name: str, 
 
 def _read_holdings(record: dict[str, Any] | None):
     asset_class = _asset_class(record)
+    if asset_class == ASSET_FOF:
+        return _read_fund_unit_holdings
 
     def read(payload, url, fund_name, parser_key, diagnostics=None, workbook=None):
         return _read_portfolio(asset_class, payload, url, fund_name, parser_key, diagnostics, workbook)
@@ -1027,6 +1246,7 @@ def _pair_overlap(left: dict[str, Any], right: dict[str, Any], classes: set[str]
     equity_overlap, equity_count = part(ASSET_EQUITY)
     debt_overlap, debt_count = part(ASSET_DEBT)
     return {
+        'overlap_type': OVERLAP_SECURITIES,
         'overlap_pct': overlap,
         'common_holdings': common,
         'equity_overlap_pct': equity_overlap,
@@ -1055,6 +1275,67 @@ def _common_holdings(left: dict[str, Any], right: dict[str, Any]) -> list[dict[s
         'overlap_weight': round(min(left_weights[isin], right_weights[isin]), 2),
         'security_class': _security_class(left, isin),
     } for isin in common]
+
+
+def _share_class_identities(records: list[dict[str, Any]]) -> dict[str, str]:
+    """ISIN -> the AMFI scheme code it belongs to, only where AMFI itself ties two ISINs together.
+
+    AMFI lists the growth/payout ISIN and the reinvestment ISIN of one option against one
+    scheme code, which is official proof they are the same share class. Nothing else is
+    merged: Direct and Regular plans have their own scheme codes, and a similar name proves
+    nothing. An ISIN not in this map is matched only to an identical ISIN.
+    """
+    identities: dict[str, str] = {}
+    for record in records:
+        isins = {str(isin).strip().upper() for isin in (record.get('isin'), record.get('isin_reinvest')) if isin}
+        if len(isins) == 2 and record.get('scheme_code'):
+            identities.update({isin: f"AMFI:{record['scheme_code']}" for isin in isins})
+    return identities
+
+
+def _fund_unit_weights(data: dict[str, Any], identities: dict[str, str]) -> dict[str, dict[str, Any]]:
+    """One entry per underlying fund. Rows repeating a unit, or holding both ISINs of one share class, add up."""
+    weights, names = _weights_of(data, {ASSET_FUND_UNIT}), data.get('names') or {}
+    units: dict[str, dict[str, Any]] = {}
+    for isin in sorted(weights):
+        entry = units.setdefault(identities.get(isin, isin), {'isins': [], 'name': names.get(isin) or isin, 'weight': 0.0})
+        entry['isins'].append(isin)
+        entry['weight'] += weights[isin]
+    return units
+
+
+def _fof_pair_overlap(left: dict[str, Any], right: dict[str, Any], identities: dict[str, str]) -> dict[str, Any]:
+    """Direct FoF overlap: sum(min(weight_a, weight_b)) over underlying funds both hold.
+
+    This is the overlap of the fund units themselves. It says nothing about the stocks or
+    bonds inside those funds, and it is never mixed into an equity or debt figure.
+    """
+    left_units, right_units = _fund_unit_weights(left, identities), _fund_unit_weights(right, identities)
+    common = sorted(left_units.keys() & right_units.keys(), key=lambda key: (-min(left_units[key]['weight'], right_units[key]['weight']), key))
+    rows = [{
+        'isin': left_units[key]['isins'][0],
+        **({'right_isin': right_units[key]['isins'][0]} if right_units[key]['isins'][0] != left_units[key]['isins'][0] else {}),
+        'name': left_units[key]['name'],
+        'left_weight': round(left_units[key]['weight'], 2),
+        'right_weight': round(right_units[key]['weight'], 2),
+        'overlap_weight': round(min(left_units[key]['weight'], right_units[key]['weight']), 2),
+        'security_class': ASSET_FUND_UNIT,
+        'matched_by': 'AMFI share class' if key.startswith('AMFI:') else 'ISIN',
+    } for key in common]
+    overlap = sum(min(left_units[key]['weight'], right_units[key]['weight']) for key in common)
+    return {
+        'overlap_type': OVERLAP_DIRECT_FOF,
+        'overlap_label': OVERLAP_DIRECT_FOF_LABEL,
+        'overlap_pct': overlap,
+        'common_holdings': rows,
+        'equity_overlap_pct': None,
+        'debt_overlap_pct': None,
+        'common_equity_count': None,
+        'common_debt_count': None,
+        'common_count': len(rows),
+        'common_fund_unit_count': len(rows),
+        'message': None if rows else REASON_MESSAGES[REASON_NO_COMMON_FUNDS],
+    }
 
 
 def _fund_units(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -1146,6 +1427,64 @@ def import_portfolio_holdings(scheme_code: str, portfolio_date: str, filename: s
     }
 
 
+ALL_SOURCES_UNAVAILABLE = 'Portfolio holdings unavailable from available data sources.'
+# A month-end disclosure can be dated the last business day, so allow a few days before the calendar end.
+MONTH_END_FROM_DAY = 25
+
+
+def _charlie_links(record: dict[str, Any], allowed_months: set[str]) -> list[dict[str, Any]]:
+    """The backup source's reporting months for this scheme, one per month, newest first.
+
+    Only the list of dates is requested here. Holdings are fetched later, for just the months
+    the comparison actually needs.
+    """
+    code = str(record.get('scheme_code'))
+    links, seen = [], set()
+    for as_of in charlie_alpha.list_periods(record):
+        month = as_of[:7]
+        # Month-end portfolios only. The provider also keeps mid-month (fortnightly) snapshots, but the
+        # official reader and every comparison use the month-end disclosure, so dates stay like for like.
+        if int(as_of[8:10]) < MONTH_END_FROM_DAY:
+            continue
+        if month in allowed_months and month not in seen:
+            seen.add(month)
+            links.append({'url': f'charlie://{code}/{as_of}', 'month': month, 'portfolio_date': as_of, 'charlie': True, 'as_of': as_of})
+    return links
+
+
+def _holdings_from_charlie(code: str, month: str, link: dict[str, Any], debug: dict[str, Any], record: dict[str, Any] | None) -> dict[str, Any]:
+    """One month of holdings from the backup source, checked, converted and saved as third-party JSON.
+
+    Raises if the response fails any check. Nothing is ever repaired or topped up from another source.
+    """
+    if not charlie_alpha.enabled():
+        raise charlie_alpha.CharlieError(charlie_alpha.DISABLED, 'Backup source is switched off')
+    if record is None:
+        raise ProviderError('Scheme is missing from the AMFI list')
+    as_of = link['as_of']
+    payload = charlie_alpha.fetch_holdings(record, as_of)
+    asset_class = _asset_class(record)
+    category = payload.get('category')
+    result = charlie_alpha.normalise_portfolio(
+        record, payload, requested_as_of=as_of, asset_class=asset_class,
+        payload_asset_class=_asset_class({'category': category}) if category else None,
+    )
+    if result['portfolio_date'][:7] != month:
+        raise ProviderError(f"Portfolio reports {result['portfolio_date']}, not {month}")
+    validation = result.pop('validation')
+    reference = charlie_alpha.endpoint_reference(code, as_of)
+    result.update({
+        'matched_sheet_name': 'Third-party API', 'source': 'Charlie Alpha API', 'asset_class': asset_class,
+        'source_url': reference, 'source_type': charlie_alpha.SOURCE_THIRD_PARTY,
+    })
+    debug['parse_result'] = {'status': 'ok', 'holding_count': len(result['holdings']), 'source': 'charlie_alpha'}
+    debug['matched_sheet_name'] = 'Third-party API'
+    # store_snapshot never lets this replace an official month, and never fails the analysis if it cannot write.
+    store_snapshot(record, code, month, result, source_url=reference, source_type=SOURCE_CHARLIE, validation=validation)
+    result['validation'] = validation
+    return result
+
+
 def _ensure_classes(needed: set[str], code: str, month: str, data: dict[str, Any], source: dict[str, Any], scheme_name: str, debug: dict[str, Any], downloaded: dict[str, bytes], workbooks: dict[str, Any], record: dict[str, Any] | None) -> dict[str, Any]:
     """A file cached before securities were labelled lacks a kind. Re-read the official file once."""
     if needed <= set(data.get('classes_read') or []) or not data.get('source_url'):
@@ -1188,14 +1527,17 @@ def _holdings_from_link(
     record: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Load one month's verified holdings from storage, a cached entry or a disclosure file."""
+    if link.get('charlie'):
+        return _holdings_from_charlie(code, month, link, debug, record)
     instrument_types: dict[str, str] = {}
     issuers: dict[str, str] = {}
     other_holdings: list[dict[str, Any]] = []
     security_classes: dict[str, str] = {}
-    default_classes = ['debt' if _asset_class(record) == ASSET_DEBT else 'equity']
+    default_classes = {ASSET_DEBT: [ASSET_DEBT], ASSET_FOF: [ASSET_FUND_UNIT]}.get(_asset_class(record), [ASSET_EQUITY])
     classes_read: list[str] = default_classes
     unclassified_weight: float | None = None
     source_url = link['url'] if str(link.get('url', '')).startswith('http') else ''
+    stored_source = charlie_alpha.SOURCE_OFFICIAL
     if link.get('stored'):
         stored = load_snapshot(link['snapshot_id'])
         holdings, names, industries = stored['holdings'], stored['names'], stored['industries']
@@ -1204,6 +1546,7 @@ def _holdings_from_link(
         other_holdings = stored['other_holdings']
         security_classes, classes_read = stored['security_classes'], stored['classes_read']
         unclassified_weight, source_url = stored['unclassified_weight'], stored['source_url']
+        stored_source = charlie_alpha.SOURCE_THIRD_PARTY if stored.get('source_type') == SOURCE_CHARLIE else charlie_alpha.SOURCE_OFFICIAL
         debug['parse_result'] = {'status': 'ok', 'holding_count': len(holdings), 'source': 'stored'}
     elif link.get('imported') or link.get('cached'):
         cached = cache.get(link['cache_key'])
@@ -1267,6 +1610,7 @@ def _holdings_from_link(
         'classes_read': classes_read,
         'unclassified_weight': unclassified_weight,
         'source_url': source_url,
+        'source_type': stored_source,
     }
     if not link.get('imported') and not link.get('cached') and not link.get('stored'):
         _cache_parsed_holdings(code, reporting_date, holdings, link['url'], names, industries, benchmark, risk_level, instrument_types, issuers, other_holdings, {'security_classes': security_classes, 'classes_read': classes_read, 'unclassified_weight': unclassified_weight})
@@ -1300,6 +1644,12 @@ def _debt_allocation(weights: dict[str, float]) -> dict[str, float]:
     """
     total = sum(weights.values())
     return {'debt_securities': round(total, 2), 'other': round(100 - total, 2)}
+
+
+def _fof_allocation(weights: dict[str, float]) -> dict[str, float]:
+    """Other is what the fund units leave: repo, cash, net current assets and any AIF units."""
+    total = sum(weights.values())
+    return {'fund_units': round(total, 2), 'other': round(100 - total, 2)}
 
 
 def _hybrid_allocation(equity: dict[str, float], debt: dict[str, float]) -> dict[str, float]:
@@ -1348,7 +1698,7 @@ def fetch_fund_holdings(code: str, record: dict[str, Any] | None) -> dict[str, A
     if not record:
         return empty
     amc_name = record.get('amc') or ''
-    stored = stored_links(record)
+    stored = [link for link in stored_links(record) if charlie_alpha.enabled() or not link.get('third_party')]
     try:
         links = [*stored, *_imported_links(amc_name, code), *_parsed_links(code)]
     except Exception as exc:
@@ -1363,12 +1713,25 @@ def fetch_fund_holdings(code: str, record: dict[str, Any] | None) -> dict[str, A
             logger.warning('Portfolio link lookup failed for AMC %s: %s', amc_name, exc)
     recent_months = _recent_portfolio_months()
     # A stable sort keeps stored and uploaded entries ahead of downloads within a month.
-    links = sorted((link for link in links if link.get('month') in recent_months), key=lambda link: link['month'], reverse=True)
+    # Newest month first. Within a month, official files come before a saved third-party copy.
+    links = sorted((link for link in links if link.get('month') in recent_months), key=lambda link: (link['month'], not link.get('third_party')), reverse=True)
     source = source or {'key': _amc_directory_name(amc_name), 'parser': 'import_by_code'}
     debug = _overlap_debug_record(code, record)
     downloaded: dict[str, bytes] = {}
     workbooks: dict[str, tuple[dict[str, pd.DataFrame], dict[str, list[list[str]]]]] = {}
-    for link in links:
+
+    def with_backup():
+        # Reached only after every official month failed, so the backup source is never asked while official data works.
+        yield from links
+        if charlie_alpha.enabled():
+            try:
+                yield from _charlie_links(record, recent_months)
+            except charlie_alpha.CharlieError as exc:
+                logger.warning('Backup periods unavailable for scheme %s: %s', code, exc.code)
+
+    if charlie_alpha.enabled():
+        charlie_alpha.begin_analysis()
+    for link in with_backup():
         try:
             result = _holdings_from_link(code, link['month'], link, source, name, debug, downloaded, workbooks, record)
         except Exception as exc:
@@ -1398,6 +1761,8 @@ def fetch_fund_holdings(code: str, record: dict[str, Any] | None) -> dict[str, A
         instrument_labels = {**instrument_types, **{isin: 'Equity Shares' for isin in equity_rows}}
         if asset_class == ASSET_DEBT:
             allocation = _debt_allocation(weights)
+        elif asset_class == ASSET_FOF:
+            allocation = _fof_allocation(weights)
         elif is_hybrid:
             allocation = _hybrid_allocation(equity_rows, _weights_of(result, {ASSET_DEBT}))
         else:
@@ -1405,6 +1770,7 @@ def fetch_fund_holdings(code: str, record: dict[str, Any] | None) -> dict[str, A
         return {
             'holdings': sorted([*rows, *_debt_other_rows(others)], key=lambda row: -row['weight']),
             'holdings_as_of': result['portfolio_date'],
+            'holdings_source': result.get('source_type') or charlie_alpha.SOURCE_OFFICIAL,
             'benchmark': result.get('benchmark'),
             'asset_class': asset_class,
             'allocation': allocation,
@@ -1421,10 +1787,15 @@ def fetch_fund_holdings(code: str, record: dict[str, Any] | None) -> dict[str, A
 def _overlap_reason(highest_pair: dict[str, Any] | None, funds: list[dict[str, Any]], unavailable_pairs: list[dict[str, Any]]) -> str | None:
     """Say why there is no overlap figure, or why the figure is zero."""
     if highest_pair:
-        return REASON_NO_COMMON_SECURITIES if not highest_pair['common_holdings'] else None
+        if highest_pair['common_holdings']:
+            return None
+        return REASON_NO_COMMON_FUNDS if highest_pair.get('overlap_type') == OVERLAP_DIRECT_FOF else REASON_NO_COMMON_SECURITIES
     available = [fund for fund in funds if fund.get('available')]
+    if any(fund.get('reason_code') == REASON_HISTORICAL_UNAVAILABLE for fund in funds):
+        return REASON_HISTORICAL_UNAVAILABLE
     if unavailable_pairs:
-        return REASON_HOLDINGS_UNAVAILABLE
+        reasons = {pair['reason'] for pair in unavailable_pairs}
+        return reasons.pop() if len(reasons) == 1 else REASON_HOLDINGS_UNAVAILABLE
     statuses = {fund.get('status') for fund in funds if not fund.get('available')}
     if statuses & {PARSING_FAILED, INVALID_WORKBOOK}:
         return REASON_PARSER_UNSUPPORTED
@@ -1433,7 +1804,61 @@ def _overlap_reason(highest_pair: dict[str, Any] | None, funds: list[dict[str, A
     return REASON_HOLDINGS_UNAVAILABLE
 
 
-def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
+def _pair_source(left: dict[str, Any], right: dict[str, Any]) -> str:
+    """official_amc only if both sides are official. charlie_alpha if both are third-party. Otherwise mixed."""
+    sources = {left.get('source_type') or charlie_alpha.SOURCE_OFFICIAL, right.get('source_type') or charlie_alpha.SOURCE_OFFICIAL}
+    return sources.pop() if len(sources) == 1 else 'mixed'
+
+
+def _fund_reason_code(fund: dict[str, Any]) -> str | None:
+    """The machine-readable reason a fund has no usable holdings, or None when it has some."""
+    if fund.get('available'):
+        return None
+    status = fund.get('status')
+    if status == REASON_HISTORICAL_UNAVAILABLE:
+        return REASON_HISTORICAL_UNAVAILABLE
+    if status == SOURCE_NOT_SUPPORTED:
+        return REASON_SOURCE_NOT_SUPPORTED
+    if status == NO_COMMON_MONTH:
+        return REASON_NO_COMMON_MONTH
+    if status in (PARSING_FAILED, INVALID_WORKBOOK):
+        return REASON_PARSER_UNSUPPORTED
+    if status == DOWNLOAD_BLOCKED:
+        return REASON_DOWNLOAD_BLOCKED
+    if status == SCHEME_NOT_FOUND:
+        return REASON_SCHEME_NOT_IN_FILES
+    if status in (DISCLOSURE_NOT_PUBLISHED, DOWNLOAD_FAILED):
+        return REASON_FILE_UNAVAILABLE
+    return REASON_HOLDINGS_UNAVAILABLE
+
+
+def _pair_gap(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    """Why two selected funds have no overlap figure. A fund's own problem comes before the pair's."""
+    problems = [fund for fund in (left, right) if not fund.get('available')]
+    ranking = (REASON_HISTORICAL_UNAVAILABLE, REASON_SOURCE_NOT_SUPPORTED, REASON_DOWNLOAD_BLOCKED, REASON_FILE_UNAVAILABLE, REASON_SCHEME_NOT_IN_FILES, REASON_PARSER_UNSUPPORTED, REASON_HOLDINGS_UNAVAILABLE, REASON_NO_COMMON_MONTH)
+    code = min((fund.get('reason_code') or REASON_HOLDINGS_UNAVAILABLE for fund in problems), key=lambda reason: ranking.index(reason) if reason in ranking else len(ranking), default=REASON_NO_COMMON_MONTH)
+    message = historical_message([fund.get('scheme_name') for fund in problems if fund.get('reason_code') == REASON_HISTORICAL_UNAVAILABLE]) if code == REASON_HISTORICAL_UNAVAILABLE else REASON_MESSAGES[code]
+    return {
+        'left': left['scheme_code'], 'right': right['scheme_code'], 'reason': code, 'reason_code': code, 'message': message,
+        # Each fund's own latest month, so a pair with no common month shows what each one has.
+        'left_portfolio_month': left.get('portfolio_month'), 'right_portfolio_month': right.get('portfolio_month'),
+    }
+
+
+def analyze_holdings_overlap(scheme_codes: list[str], portfolio_month: str | None = None, progress: Callable[[str], None] | None = None) -> dict:
+    """Compare funds' disclosed holdings.
+
+    portfolio_month (YYYY-MM) selects historical mode: only that month's verified holdings
+    are used, for every fund, and a fund without them is reported unavailable. Without it,
+    the latest common month in the lookback is used, as always.
+
+    progress, if given, is called with 'fetching', 'validating' and 'calculating' as the work
+    reaches each stage. Downloads happen as each month's file is first needed, so 'validating'
+    covers reading and checking that file as well as the checks themselves.
+    """
+    historical_mode = portfolio_month is not None
+    report = progress or (lambda _stage: None)
+    report('fetching')
     if len(scheme_codes) < 2:
         return {
             'portfolio_month': None,
@@ -1463,7 +1888,7 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
             'debug': debug,
         }
     record_by_code = {str(row.get('scheme_code')): row for row in latest_records}
-    recent_months = _recent_portfolio_months()
+    recent_months = {portfolio_month} if historical_mode else _recent_portfolio_months()
     fund_results = []
     debug_by_code: dict[str, dict[str, Any]] = {}
     links_by_code: dict[str, list[dict[str, str]]] = {}
@@ -1471,6 +1896,28 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
     name_by_code: dict[str, str] = {}
     checked_sources: set[str] = set()
     status_by_code: dict[str, str] = {}
+    # The backup source is tried per fund, and only once the official path has failed for it.
+    backup_tried: set[str] = set()
+    backup_failed: dict[str, str] = {}
+    backup_cache: dict[str, list[dict[str, Any]]] = {}
+    if charlie_alpha.enabled():
+        charlie_alpha.begin_analysis()
+
+    def backup_links(code: str) -> list[dict[str, Any]]:
+        """The backup source's months for a fund the official reader could not supply. [] if switched off or unavailable."""
+        if not charlie_alpha.enabled():
+            return []
+        if code not in backup_cache:
+            report('backup')
+            backup_tried.add(code)
+            try:
+                backup_cache[code] = _charlie_links(record_by_code[code], recent_months)
+            except charlie_alpha.CharlieError as exc:
+                logger.warning('Backup periods unavailable for scheme %s: %s', code, exc.code)
+                backup_failed[code] = exc.code
+                debug_by_code[code]['backup_error'] = exc.code
+                backup_cache[code] = []
+        return backup_cache[code]
 
     for code in scheme_codes:
         code = str(code)
@@ -1490,11 +1937,34 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
             logger.warning('Portfolio holdings cache unavailable for %s: %s', code, exc)
             imported_links = []
             parsed_links = []
-        stored = stored_links(record)
+        # Saved third-party copies are served only while the backup source is switched on.
+        stored = [link for link in stored_links(record) if charlie_alpha.enabled() or not link.get('third_party')]
         name_by_code[code] = file_scheme_name(record)
+        state = scheme_status(record)
+        # A scheme that stopped reporting years ago has no recent portfolio to find. Its own
+        # last months are history, and in historical mode a month after its last NAV is impossible.
+        stopped = state['status'] != SCHEME_ACTIVE and (not historical_mode or portfolio_month > (state['last_nav_date'] or '')[:7])
+        if stopped:
+            debug['error'] = f"Scheme stopped reporting NAV on {state['last_nav_date']} ({state['status'].lower()})"
+            status_by_code[code] = REASON_HISTORICAL_UNAVAILABLE
+            fund_results.append({
+                'scheme_code': code, 'scheme_name': record.get('scheme_name'), 'amc': amc_name, 'available': False,
+                'reason': historical_message([record.get('scheme_name')]),
+                'historical_months_available': sorted({link['month'] for link in stored}, reverse=True),
+            })
+            continue
         source = source_for_amc(amc_name)
+        # Past the AMC site's lookback there is nothing to list, so only saved files can answer.
+        can_discover = bool(source) and (not historical_mode or portfolio_month in _recent_portfolio_months())
         if not source and not imported_links and not parsed_links and not stored:
             debug['error'] = 'Overlap not available for this AMC'
+            backup = backup_links(code)
+            if backup:
+                links_by_code[code] = backup
+                source_by_code[code] = {'key': _amc_directory_name(amc_name), 'parser': 'import_by_code'}
+                debug.update({'monthly_links_found': len(backup), 'months_found': sorted({link['month'] for link in backup})})
+                fund_results.append({'scheme_code': code, 'scheme_name': record.get('scheme_name'), 'amc': amc_name, 'available': False, 'reason': 'Waiting for a common portfolio month'})
+                continue
             # The background job may know why, such as a blocked AMC website.
             status_by_code[code] = source_status(record) or SOURCE_NOT_SUPPORTED
             fund_results.append({'scheme_code': code, 'scheme_name': record.get('scheme_name'), 'amc': amc_name, 'available': False, 'reason': debug['error']})
@@ -1502,13 +1972,13 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
         remote_links = []
         try:
             # Ask the AMC's site only when no recent check has already answered this.
-            if source and discovery_due(record):
+            if can_discover and discovery_due(record):
                 checked_sources.add(code)
                 remote_links = _monthly_files_for_fund(source, name_by_code[code])
                 listing_errors = [link['listing_error'] for link in remote_links if link.get('listing_error')]
                 if listing_errors:
                     debug['error'] = listing_errors[0]
-            elif source and not stored:
+            elif can_discover and not stored:
                 status_by_code[code] = source_status(record) or DOWNLOAD_FAILED
                 debug['error'] = 'Waiting before asking this source again'
         except ProviderError as exc:
@@ -1516,6 +1986,10 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
             debug['error'] = str(exc)
         try:
             links = [link for link in [*stored, *imported_links, *parsed_links, *remote_links] if link.get('month') in recent_months]
+            # Within a month, official files come before a saved third-party copy of that month.
+            links.sort(key=lambda link: bool(link.get('third_party')))
+            if not links:
+                links = backup_links(code)
             if not links:
                 raise ProviderError('No monthly portfolio links or cached holdings in the lookback period')
             months = sorted({str(link.get('month')) for link in links if link.get('month')})
@@ -1530,42 +2004,106 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
                 status_by_code.setdefault(code, SOURCE_NOT_SUPPORTED)
             fund_results.append({'scheme_code': code, 'scheme_name': record.get('scheme_name'), 'amc': amc_name, 'available': False, 'reason': 'Overlap unavailable right now'})
 
-    supported_codes = list(links_by_code)
-    candidate_months = sorted((
-        month for month in {link['month'] for links in links_by_code.values() for link in links}
-        if sum(any(link['month'] == month for link in links_by_code[code]) for code in supported_codes) >= 2
-    ), reverse=True)
+    report('validating')
     valid_by_month: dict[str, dict[str, dict[str, Any]]] = {}
     downloaded: dict[str, bytes] = {}
     workbooks: dict[str, tuple[dict[str, pd.DataFrame], dict[str, list[list[str]]]]] = {}
-    global_month: str | None = None
+    loaded: dict[tuple[str, str], dict[str, Any] | None] = {}
+    failed_links: set[tuple[str, str]] = set()
 
-    for month in candidate_months:
-        month_results: dict[str, dict[str, Any]] = {}
-        for code in supported_codes:
-            links = [link for link in links_by_code[code] if link['month'] == month]
-            if not links:
-                continue
-            debug = debug_by_code[code]
+    def load(code: str, month: str, comparing: bool = True) -> dict[str, Any] | None:
+        """This fund's first valid holdings for the month. Each file is tried at most once per analysis.
+
+        comparing=False reads a fund's own month only to report it. As before, that is not counted as
+        an attempted comparison month, so a failure there never puts the fund's source into back-off.
+        """
+        key = (code, month)
+        if loaded.get(key) is not None:
+            return loaded[key]
+        candidates = [link for link in links_by_code[code] if link['month'] == month and (code, link['url']) not in failed_links]
+        debug = debug_by_code[code]
+        if comparing and candidates and month not in debug['attempted_months']:
             debug['attempted_months'].append(month)
-            for link in links:
-                try:
-                    month_results[code] = _holdings_from_link(
-                        code, month, link, source_by_code[code],
-                        name_by_code[code], debug, downloaded, workbooks, record_by_code[code],
-                    )
+        for link in candidates:
+            try:
+                loaded[key] = _holdings_from_link(code, month, link, source_by_code[code], name_by_code[code], debug, downloaded, workbooks, record_by_code[code])
+                return loaded[key]
+            except Exception as exc:
+                failed_links.add((code, link['url']))
+                if link.get('charlie'):
+                    # A backup failure never overwrites the official reader's own reason.
+                    backup_failed[code] = getattr(exc, 'code', 'ERROR')
+                    debug['backup_error'] = backup_failed[code]
+                    logger.warning('Backup portfolio %s failed for scheme %s: %s', month, code, backup_failed[code])
+                    continue
+                error = str(exc) or exc.__class__.__name__
+                status_by_code.setdefault(code, _link_error_status(link, exc))
+                logger.warning('Portfolio %s failed for scheme %s: %s', month, code, error)
+                debug['errors_by_month'].setdefault(month, []).append(error)
+                debug['error'] = error
+                debug['parse_result'] = {'status': 'error'}
+        loaded[key] = None
+        return None
+
+    def choose_months() -> tuple[list[str], list[str], str | None]:
+        supported = list(links_by_code)
+        months = sorted((
+            month for month in {link['month'] for links in links_by_code.values() for link in links}
+            if sum(any(link['month'] == month for link in links_by_code[code]) for code in supported) >= 2
+        ), reverse=True)
+        chosen: str | None = None
+        for month in months:
+            valid = {}
+            for code in supported:
+                if any(link['month'] == month for link in links_by_code[code]):
+                    result = load(code, month)
+                    if result:
+                        valid[code] = result
+            valid_by_month[month] = valid
+            if len(supported) >= 2 and len(valid) == len(supported):
+                chosen = month
+                break
+        # No month suits every fund that has files, but a fund whose files all failed, or that shares
+        # no month with the rest, cannot be compared at all. Skip such funds and look again for a month
+        # common to every fund that can be. Every month is already loaded here, so this costs nothing.
+        if chosen is None:
+            evaluable = {code for month in months for code in valid_by_month.get(month, {})}
+            if len(evaluable) >= 2:
+                chosen = next((month for month in months if evaluable <= set(valid_by_month.get(month, {}))), None)
+        return supported, months, chosen
+
+    def own_months(supported: list[str], months: list[str]) -> dict[str, tuple[str, dict[str, Any]]]:
+        # A fund with no month in common is still a fund with valid holdings. Read its own latest
+        # month so it is reported available, and leave "no common month" to the pair it affects.
+        own = {}
+        for code in supported:
+            if any(code in valid_by_month.get(month, {}) for month in months):
+                continue
+            for month in sorted({link['month'] for link in links_by_code[code]} - set(months), reverse=True):
+                result = load(code, month, comparing=False)
+                if result:
+                    own[code] = (month, result)
                     break
-                except Exception as exc:
-                    error = str(exc) or exc.__class__.__name__
-                    status_by_code.setdefault(code, _link_error_status(link, exc))
-                    logger.warning('Portfolio %s failed for scheme %s: %s', month, code, error)
-                    debug['errors_by_month'].setdefault(month, []).append(error)
-                    debug['error'] = error
-                    debug['parse_result'] = {'status': 'error'}
-        valid_by_month[month] = month_results
-        if len(supported_codes) >= 2 and len(month_results) == len(supported_codes):
-            global_month = month
-            break
+        return own
+
+    supported_codes, candidate_months, global_month = choose_months()
+    own_holdings = own_months(supported_codes, candidate_months)
+
+    # The backup source is only for a fund the official reader could not supply in ANY month. A fund
+    # with official holdings keeps them, even when a newer third-party month exists. Then choose again.
+    rescued = False
+    for code in supported_codes:
+        has_official = any(code in valid_by_month.get(month, {}) for month in candidate_months) or code in own_holdings
+        if has_official or any(link.get('charlie') for link in links_by_code[code]):
+            continue
+        extra = backup_links(code)
+        if extra:
+            links_by_code[code] = [*links_by_code[code], *extra]
+            rescued = True
+    if rescued:
+        valid_by_month.clear()
+        supported_codes, candidate_months, global_month = choose_months()
+        own_holdings = own_months(supported_codes, candidate_months)
 
     for fund in fund_results:
         code = fund['scheme_code']
@@ -1574,11 +2112,14 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
         best_month = global_month if global_month and code in valid_by_month[global_month] else next(
             (month for month in candidate_months if code in valid_by_month.get(month, {})), None,
         )
+        if best_month is None and code in own_holdings:
+            best_month = own_holdings[code][0]
         if best_month:
-            selected = valid_by_month[best_month][code]
+            selected = valid_by_month[best_month][code] if code in valid_by_month.get(best_month, {}) else own_holdings[code][1]
             fund.update({
                 'available': True, 'reason': None, 'portfolio_month': best_month,
                 'portfolio_date': selected['portfolio_date'],
+                'holdings_source': selected.get('source_type') or charlie_alpha.SOURCE_OFFICIAL,
                 'holding_count': len(_weights_of(selected, FUND_SECURITY_CLASSES[_asset_class(record_by_code[code])])),
                 'asset_class': _asset_class(record_by_code[code]),
                 **({'unclassified_pct': round(selected['unclassified_weight'], 2)} if (selected.get('unclassified_weight') or 0) > MATERIAL_UNCLASSIFIED_WEIGHT else {}),
@@ -1609,9 +2150,26 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
         # so it must not make the next request wait a day before trying it.
         if code in checked_sources and status != NO_COMMON_MONTH:
             record_status(record_by_code[code], status, debug_by_code[code]['error'] or '', fund.get('portfolio_month'))
+        if code in record_by_code:
+            state = scheme_status(record_by_code[code])
+            fund.update({'scheme_status': state['status'], 'last_nav_date': state['last_nav_date']})
+        fund['reason_code'] = _fund_reason_code(fund)
+        fund['status_message'] = REASON_MESSAGES.get(fund['reason_code']) if fund['reason_code'] else None
+        if historical_mode and not fund.get('available') and fund['reason_code'] != REASON_HISTORICAL_UNAVAILABLE:
+            # The month asked for has no verified portfolio. The source status says why, if it knows.
+            fund.update({'source_status': status, 'reason_code': REASON_HISTORICAL_UNAVAILABLE, 'reason': historical_message([fund.get('scheme_name') or code]), 'status_message': REASON_MESSAGES[REASON_HISTORICAL_UNAVAILABLE]})
+            fund['status'] = REASON_HISTORICAL_UNAVAILABLE
+        if fund['reason_code'] == REASON_HISTORICAL_UNAVAILABLE:
+            fund['message'] = historical_message([fund.get('scheme_name') or code])
+        elif code in backup_tried and not fund.get('available'):
+            # The official reader could not supply it and neither could the backup. Say so plainly.
+            fund['backup_attempted'] = True
+            fund['message'] = ALL_SOURCES_UNAVAILABLE
 
+    report('calculating')
     pairs = []
     unavailable_pairs = []
+    share_class_identities = _share_class_identities(latest_records)
     for left_index, left_code in enumerate(scheme_codes):
         for right_code in scheme_codes[left_index + 1:]:
             left_code, right_code = str(left_code), str(right_code)
@@ -1627,7 +2185,13 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
             right_data = valid_by_month[pair_month][right_code]
             left_record = record_by_code[left_code]
             right_record = record_by_code[right_code]
-            classes = _eligible_classes(_asset_class(left_record), _asset_class(right_record))
+            left_is_fof, right_is_fof = _asset_class(left_record) == ASSET_FOF, _asset_class(right_record) == ASSET_FOF
+            if left_is_fof != right_is_fof:
+                # A look-through needs the underlying funds' own holdings, retrieved and validated.
+                # We hold only the fund units, so a figure here would be invented.
+                unavailable_pairs.append({'left': left_code, 'right': right_code, 'portfolio_month': pair_month, 'reason': REASON_FOF_LOOKTHROUGH})
+                continue
+            classes = {ASSET_FUND_UNIT} if left_is_fof else _eligible_classes(_asset_class(left_record), _asset_class(right_record))
             for code, data, record in ((left_code, left_data, left_record), (right_code, right_data, right_record)):
                 fresh = _ensure_classes(classes, code, pair_month, data, source_by_code[code], name_by_code[code], debug_by_code[code], downloaded, workbooks, record)
                 valid_by_month[pair_month][code] = fresh
@@ -1636,7 +2200,7 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
             if not (classes <= set(left_data.get('classes_read') or []) and classes <= set(right_data.get('classes_read') or [])):
                 unavailable_pairs.append({'left': left_code, 'right': right_code, 'portfolio_month': pair_month, 'reason': REASON_HOLDINGS_UNAVAILABLE})
                 continue
-            comparison = _pair_overlap(left_data, right_data, classes)
+            comparison = _fof_pair_overlap(left_data, right_data, share_class_identities) if left_is_fof else _pair_overlap(left_data, right_data, classes)
             overlap_pct = comparison['overlap_pct']
             # Fund units are never part of a stock comparison, or of overlap_pct itself.
             fund_units = _common_fund_units(left_data, right_data) if ASSET_DEBT in classes else []
@@ -1647,6 +2211,14 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
                 'incomplete_coverage': any((data.get('unclassified_weight') or 0) > MATERIAL_UNCLASSIFIED_WEIGHT for data in (left_data, right_data)),
                 'portfolio_month': pair_month,
                 'portfolio_date': left_data['portfolio_date'] if left_data['portfolio_date'] == right_data['portfolio_date'] else None,
+                'left_portfolio_date': left_data['portfolio_date'],
+                'right_portfolio_date': right_data['portfolio_date'],
+                'left_source': left_data.get('source_type') or charlie_alpha.SOURCE_OFFICIAL,
+                'right_source': right_data.get('source_type') or charlie_alpha.SOURCE_OFFICIAL,
+                'holdings_source': _pair_source(left_data, right_data),
+                # COMMON_TO_ALL: the one month every comparable fund reported. PAIRWISE: no such month
+                # exists, so this pair uses the latest month its own two funds share.
+                'month_basis': 'COMMON_TO_ALL' if global_month and pair_month == global_month else 'PAIRWISE',
                 # A second figure for reference. overlap_pct above never includes fund units.
                 **({'including_fund_units': {
                     'overlap_pct': round(overlap_pct + sum(min(unit['left_weight'], unit['right_weight']) for unit in fund_units), 2),
@@ -1654,7 +2226,28 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
                 }} if fund_units else {}),
             })
 
-    highest_pair = max(pairs, key=lambda pair: pair['overlap_pct'], default=None)
+    # Direct FoF overlap is a different measure from security overlap, so it never outranks one.
+    # It heads the summary only when it is the sole kind of pair.
+    # Every pair without a figure says why, so one fund's problem never hides as another's.
+    fund_by_code = {fund['scheme_code']: fund for fund in fund_results}
+    compared = {(pair['left']['scheme_code'], pair['right']['scheme_code']) for pair in pairs}
+    explicit = {(item['left'], item['right']): item for item in unavailable_pairs}
+    pair_reasons = []
+    for left_index, left_code in enumerate(scheme_codes):
+        for right_code in scheme_codes[left_index + 1:]:
+            key = (str(left_code), str(right_code))
+            if key in compared:
+                continue
+            if key in explicit:
+                pair_reasons.append({'left': key[0], 'right': key[1], 'reason_code': explicit[key]['reason'], 'message': REASON_MESSAGES[explicit[key]['reason']]})
+            else:
+                gap = _pair_gap(fund_by_code[key[0]], fund_by_code[key[1]])
+                gap = {name: value for name, value in gap.items() if name != 'reason'}
+                if any(fund_by_code[code].get('backup_attempted') for code in key) and gap['reason_code'] not in (REASON_NO_COMMON_MONTH, REASON_HISTORICAL_UNAVAILABLE):
+                    gap['message'] = ALL_SOURCES_UNAVAILABLE
+                pair_reasons.append(gap)
+    ranked_pairs = [pair for pair in pairs if pair.get('overlap_type') != OVERLAP_DIRECT_FOF] or pairs
+    highest_pair = max(ranked_pairs, key=lambda pair: pair['overlap_pct'], default=None)
     pair_months = {pair['portfolio_month'] for pair in pairs}
     pairs_different_months = len(pair_months) > 1
     selected_month = global_month or (next(iter(pair_months)) if len(pair_months) == 1 else None)
@@ -1668,8 +2261,12 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
     if highest_pair:
         # Equity selections keep showing a plain 0.00%.
         highest_message = REASON_MESSAGES[reason_code] if has_debt and reason_code else None
+    elif reason_code == REASON_HISTORICAL_UNAVAILABLE:
+        highest_message = historical_message([fund.get('scheme_name') or fund['scheme_code'] for fund in fund_results if fund.get('reason_code') == REASON_HISTORICAL_UNAVAILABLE])
     else:
         highest_message = REASON_MESSAGES[reason_code] if has_debt else 'Portfolio holdings unavailable'
+    if not highest_pair and backup_tried and reason_code in (REASON_HOLDINGS_UNAVAILABLE, REASON_PARSER_UNSUPPORTED):
+        highest_message = ALL_SOURCES_UNAVAILABLE
     highest_overlap = {
         'available': highest_pair is not None,
         'percentage': round(highest_pair['overlap_pct'], 2) if highest_pair else None,
@@ -1683,8 +2280,12 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
         'partial_coverage': bool(highest_pair and len(pairs) < total_pairs),
         'compared_pairs': len(pairs),
         'total_pairs': total_pairs,
+        'month_basis': highest_pair.get('month_basis') if highest_pair else None,
+        'holdings_source': highest_pair.get('holdings_source') if highest_pair else None,
         'message': highest_message,
         'reason_code': reason_code,
+        'overlap_type': highest_pair.get('overlap_type', OVERLAP_SECURITIES) if highest_pair else None,
+        'overlap_label': highest_pair.get('overlap_label') if highest_pair else None,
     }
     debug = [debug_by_code[str(code)] for code in scheme_codes]
     logger.debug('Holdings overlap diagnostics: %s', debug)
@@ -1696,9 +2297,21 @@ def analyze_holdings_overlap(scheme_codes: list[str]) -> dict:
         overall_status = next((fund['status'] for fund in fund_results if fund['status'] != HOLDINGS_AVAILABLE), NO_COMMON_MONTH)
     return {
         'portfolio_month': selected_month,
+        # The one month every comparable fund reported, if there is one. None means pairs use their own months.
+        'common_month': global_month,
+        'pair_months': sorted(pair_months, reverse=True),
+        'compared_pairs': len(pairs),
+        'total_pairs': total_pairs,
+        'partial_coverage': 0 < len(pairs) < total_pairs,
+        # Which kinds of source the figures came from. A third-party source is always named.
+        'holdings_sources': sorted({fund['holdings_source'] for fund in fund_results if fund.get('holdings_source')}),
+        'backup_enabled': charlie_alpha.enabled(),
         'funds': fund_results,
         'pairs': rounded_pairs,
         'unavailable_pairs': unavailable_pairs,
+        'pair_reasons': pair_reasons,
+        'mode': 'historical' if historical_mode else 'current',
+        'requested_month': portfolio_month,
         'pairs_different_months': pairs_different_months,
         'highest_pair': highest_pair,
         'highest_overlap': highest_overlap,

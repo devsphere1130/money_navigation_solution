@@ -14,7 +14,7 @@ const expense = (fund, pending) => (fund.ter == null ? (pending ? '…' : '—')
 const aum = (fund, pending) => (fund.aum == null && pending ? '…' : crore(fund.aum));
 const upDown = (value) => (value == null ? '' : value >= 0 ? 'fa-up' : 'fa-down');
 const sourceDates = (fund) => [
-  fund.holdings_as_of && `Portfolio ${longDate(fund.holdings_as_of)}`,
+  fund.holdings_as_of && `Portfolio ${longDate(fund.holdings_as_of)}${fund.holdings_source ? ` (Holdings source: ${fund.holdings_source === 'charlie_alpha' ? 'Third-party API' : 'Official AMC'})` : ''}`,
   fund.ter_as_of && `Expense ${longDate(fund.ter_as_of)}`,
   fund.aum_as_of && `AUM quarter to ${longDate(fund.aum_as_of)}`,
 ].filter(Boolean).join(' · ');
@@ -75,7 +75,11 @@ function Allocation({ allocation, assetClass }) {
     { key: 'debt_securities', label: 'Debt securities', className: assetClass === 'hybrid' ? 'fa-detail__part--foreign' : 'fa-detail__part--indian' },
     { key: 'other', label: 'Fund units, repo, cash & other', className: 'fa-detail__part--other' },
   ];
-  const parts = assetClass === 'hybrid' ? [{ key: 'equity', label: 'Equity', className: 'fa-detail__part--indian' }, ...debtParts] : assetClass === 'debt' ? debtParts : [
+  const fofParts = [
+    { key: 'fund_units', label: 'Underlying fund units', className: 'fa-detail__part--indian' },
+    { key: 'other', label: 'Repo, cash & other', className: 'fa-detail__part--other' },
+  ];
+  const parts = assetClass === 'fof' ? fofParts : assetClass === 'hybrid' ? [{ key: 'equity', label: 'Equity', className: 'fa-detail__part--indian' }, ...debtParts] : assetClass === 'debt' ? debtParts : [
     { key: 'indian_equity', label: 'Indian equity', className: 'fa-detail__part--indian' },
     { key: 'international_equity', label: 'International equity', className: 'fa-detail__part--foreign' },
     { key: 'other', label: 'Debt, cash & other', className: 'fa-detail__part--other' },
@@ -106,7 +110,7 @@ function FundDetail({ fund, loading }) {
   const pending = isPending(fund, loading);
   const holdings = fund.holdings || [];
   const metrics = fund.metrics || {};
-  const isDebt = fund.asset_class === 'debt' || fund.asset_class === 'hybrid';
+  const isDebt = fund.asset_class === 'debt' || fund.asset_class === 'hybrid' || fund.asset_class === 'fof';
   const shown = showAll ? holdings.length : Math.min(DETAIL_HOLDINGS, holdings.length);
   const tags = [fund.category?.split(' - ').pop(), [fund.plan, fund.option].filter(Boolean).join(' · '), fund.scheme_type && `${fund.scheme_type} ended`].filter(Boolean);
   const facts = [
