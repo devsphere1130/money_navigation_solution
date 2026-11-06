@@ -148,6 +148,19 @@ REST_FRAMEWORK = {
     },
 }
 
+# Production hardening (live server only: DEBUG off). Vercel terminates HTTPS and says so in X-Forwarded-Proto.
+if not DEBUG and 'test' not in sys.argv:
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    SECURE_SSL_REDIRECT = os.getenv('DJANGO_SECURE_SSL_REDIRECT', 'True') == 'True'
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_HSTS_SECONDS = int(os.getenv('DJANGO_HSTS_SECONDS', '86400'))  # raise once HTTPS is confirmed everywhere
+    SECURE_CONTENT_TYPE_NOSNIFF = True
+
+# Sign-in lock: this many wrong passwords from one IP for one email, then locked for LOGIN_LOCK_SECONDS.
+LOGIN_MAX_ATTEMPTS = int(os.getenv('LOGIN_MAX_ATTEMPTS', '3'))
+LOGIN_LOCK_SECONDS = int(os.getenv('LOGIN_LOCK_SECONDS', '300'))
+
 # Secret typed in the login page's "Forgot password?" pop-up. Empty switches the feature off.
 PASSWORD_RESET_KEY = os.getenv('PASSWORD_RESET_KEY', '')
 

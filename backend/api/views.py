@@ -2,7 +2,8 @@ import hmac
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
-from rest_framework.exceptions import ValidationError
+from django.core.cache import cache
+from rest_framework.exceptions import AuthenticationFailed, Throttled, ValidationError
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
@@ -12,13 +13,36 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from .serializers import LoginSerializer, ResetPasswordSerializer
 
 
+def _client_ip(request):
+    # Behind Vercel's proxy the visitor is the first address of X-Forwarded-For.
+    forwarded = request.META.get('HTTP_X_FORWARDED_FOR', '')
+    return forwarded.split(',')[0].strip() or request.META.get('REMOTE_ADDR', '')
+
+
 class LoginView(APIView):
+    """Signs in. After LOGIN_MAX_ATTEMPTS wrong passwords from one IP for one email, it is locked for LOGIN_LOCK_SECONDS."""
+
     authentication_classes = []
     permission_classes = [AllowAny]
 
     def post(self, request):
+        email = str(request.data.get('email', '')).strip().lower()
+        counter = f'login-failed:{_client_ip(request)}:{email}'
+        if cache.get(counter, 0) >= settings.LOGIN_MAX_ATTEMPTS:
+            minutes = max(1, settings.LOGIN_LOCK_SECONDS // 60)
+            raise Throttled(
+                wait=settings.LOGIN_LOCK_SECONDS,
+                detail=f'Too many failed attempts. Try again in {minutes} minute{"s" if minutes != 1 else ""}.',
+            )
+
         serializer = LoginSerializer(data=request.data, context={'request': request})
-        serializer.is_valid(raise_exception=True)
+        try:
+            serializer.is_valid(raise_exception=True)
+        except AuthenticationFailed:
+            cache.add(counter, 0, settings.LOGIN_LOCK_SECONDS)  # the lock starts with the first failure
+            cache.incr(counter)
+            raise
+        cache.delete(counter)
         user = serializer.validated_data['user']
 
         refresh = RefreshToken.for_user(user)

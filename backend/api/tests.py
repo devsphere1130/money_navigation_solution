@@ -50,3 +50,31 @@ class ResetPasswordTests(APITestCase):
     def test_switched_off_without_a_key(self):
         res = self.client.post(URL, self.body(key=''), format='json')
         self.assertEqual(res.status_code, 400)
+
+
+class LoginLimitTests(APITestCase):
+    def setUp(self):
+        cache.clear()
+        get_user_model().objects.create_user(email='adv@x.com', password='RightPass#2026')
+
+    def login(self, password, email='adv@x.com'):
+        return self.client.post('/api/auth/login/', {'email': email, 'password': password}, format='json')
+
+    def test_locked_after_three_wrong_passwords(self):
+        for _ in range(3):
+            self.assertEqual(self.login('wrong').status_code, 403)
+        locked = self.login('RightPass#2026')  # even the right password is refused while locked
+        self.assertEqual(locked.status_code, 429)
+        self.assertIn('Too many failed attempts', locked.json()['detail'])
+
+    def test_two_wrong_then_right_signs_in_and_resets_the_count(self):
+        self.login('wrong')
+        self.login('wrong')
+        self.assertEqual(self.login('RightPass#2026').status_code, 200)
+        for _ in range(3):
+            self.assertEqual(self.login('wrong').status_code, 403)
+
+    def test_another_email_is_not_locked(self):
+        for _ in range(3):
+            self.login('wrong')
+        self.assertEqual(self.login('x', email='other@x.com').status_code, 403)

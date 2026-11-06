@@ -1,4 +1,4 @@
-# Money Navigating Solutions – SIP Calculator
+# Money Navigating Solutions – Financial Planning Suite
 
 - `frontend/` – React (Vite) app
 - `backend/` – Django REST API (PostgreSQL, JWT auth)
