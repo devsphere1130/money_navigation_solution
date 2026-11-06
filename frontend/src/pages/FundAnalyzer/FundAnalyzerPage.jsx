@@ -108,7 +108,11 @@ export default function FundAnalyzerPage() {
   useEffect(() => { writeSaved(selectedFunds, analyzed); }, [selectedFunds, analyzed]);
 
   // After a refresh, show the analysis again if it had been run for these funds.
+  const autoLoaded = useRef(false);
   useEffect(() => {
+    // Once only, even where React runs effects twice in development.
+    if (autoLoaded.current) return;
+    autoLoaded.current = true;
     if (saved.analyzed && saved.funds.length) load(saved.funds);
     // Runs once, on the first render only.
   }, []); // eslint-disable-line react-hooks/exhaustive-deps

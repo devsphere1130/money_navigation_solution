@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import useCalculation from '../useCalculation.js';
 import CalcPanel from '../components/CalcPanel.jsx';
 import ChartCard, { GOLD } from '../components/ChartCard.jsx';
 import { Breakdown, ResultCard, ResultRow } from '../components/Results.jsx';
@@ -17,39 +17,7 @@ const SECTIONS = [{
 }];
 
 export default function InflationCalculator({ values, onChange }) {
-  const [result, setResult] = useState(null);
-  const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
-
-  useEffect(() => {
-    if (!values.presentCost || !values.rate || !values.years) {
-      setError('Fill in all fields to calculate.');
-      return undefined;
-    }
-
-    const controller = new AbortController();
-    // Wait until the user stops typing before calling the API.
-    const timer = setTimeout(() => {
-      setLoading(true);
-      getInflation(values, controller.signal)
-        .then((data) => {
-          setResult(data);
-          setError('');
-        })
-        .catch((err) => {
-          if (!controller.signal.aborted) setError(err.message);
-        })
-        .finally(() => {
-          if (!controller.signal.aborted) setLoading(false);
-        });
-    }, 400);
-
-    // Runs when inputs change again or the tab closes: drop the pending timer and request.
-    return () => {
-      clearTimeout(timer);
-      controller.abort();
-    };
-  }, [values]);
+  const { result, error, loading } = useCalculation('inflation', getInflation, values, !(!values.presentCost || !values.rate || !values.years));
 
   return (
     <div className="calc__grid">

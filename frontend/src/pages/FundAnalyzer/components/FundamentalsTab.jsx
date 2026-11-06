@@ -48,7 +48,17 @@ const topShare = (holdings, count) => holdings.slice(0, count).reduce((sum, hold
 function FundCard({ fund, loading, onOpen }) {
   const pending = isPending(fund, loading);
   const holdings = fund.holdings || [];
-  return <article className="fa-card fa-fund" style={{ borderTopColor: fund.color }}>
+  // The whole card opens the full details, by mouse or by keyboard (Enter or Space).
+  const open = () => onOpen(fund.scheme_code);
+  return <article
+    className="fa-card fa-fund fa-fund--clickable"
+    style={{ borderTopColor: fund.color }}
+    role="button"
+    tabIndex={0}
+    aria-label={`Open full details for ${fund.scheme_name}`}
+    onClick={open}
+    onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); open(); } }}
+  >
     <header className="fa-fund__head">
       <div><h3 title={fund.scheme_name}>{shortName(fund.scheme_name)}</h3><p>{fund.amc || 'AMFI'} · {fund.category || 'Category unavailable'}</p></div>
       <RiskBadge fund={fund} pending={pending} />
@@ -65,7 +75,7 @@ function FundCard({ fund, loading, onOpen }) {
     </div>
     <footer className="fa-fund__foot">
       <span>{sourceDates(fund) || (pending ? '' : 'No official disclosure found')}</span>
-      <button type="button" onClick={() => onOpen(fund.scheme_code)}>View full details <ArrowRight size={12} /></button>
+      <button type="button" onClick={(event) => { event.stopPropagation(); open(); }}>View full details <ArrowRight size={12} /></button>
     </footer>
   </article>;
 }

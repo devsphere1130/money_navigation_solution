@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import useCalculation from '../useCalculation.js';
 import CalcPanel from '../components/CalcPanel.jsx';
 import ChartCard, { GOLD, NAVY } from '../components/ChartCard.jsx';
 import { Breakdown, ResultCard } from '../components/Results.jsx';
@@ -19,39 +19,7 @@ const SECTIONS = [{
 }];
 
 export default function GoalCalculator({ values, onChange }) {
-  const [result, setResult] = useState(null);
-  const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
-
-  useEffect(() => {
-    if (!values.goalCost || !values.inflation || !values.years || !values.returnRate || !values.savings) {
-      setError('Fill in all fields to calculate.');
-      return undefined;
-    }
-
-    const controller = new AbortController();
-    // Wait until the user stops typing before calling the API.
-    const timer = setTimeout(() => {
-      setLoading(true);
-      getGoal(values, controller.signal)
-        .then((data) => {
-          setResult(data);
-          setError('');
-        })
-        .catch((err) => {
-          if (!controller.signal.aborted) setError(err.message);
-        })
-        .finally(() => {
-          if (!controller.signal.aborted) setLoading(false);
-        });
-    }, 400);
-
-    // Runs when inputs change again or the tab closes: drop the pending timer and request.
-    return () => {
-      clearTimeout(timer);
-      controller.abort();
-    };
-  }, [values]);
+  const { result, error, loading } = useCalculation('goal', getGoal, values, !(!values.goalCost || !values.inflation || !values.years || !values.returnRate || !values.savings));
 
   const covered = result && result.shortfall === 0;
 

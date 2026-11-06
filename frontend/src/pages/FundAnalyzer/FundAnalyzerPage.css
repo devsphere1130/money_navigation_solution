@@ -476,9 +476,13 @@ td.fa-table__fund em {
 .fa-pairs__badge { flex-shrink: 0; padding: 3px 9px; border-radius: 6px; background: var(--color-yellow); font-size: 11px; font-weight: 600; color: var(--fa-navy); }
 
 /* Fundamentals */
-.fa-funds { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; align-items: start; }
+/* Two cards on a laptop, three or more on a wide screen, one on a phone. */
+.fa-funds { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 460px), 1fr)); gap: 14px; align-items: start; }
 
 .fa-fund { overflow: hidden; border-top: 3px solid; }
+.fa-fund--clickable { cursor: pointer; transition: box-shadow 0.15s ease, transform 0.15s ease; }
+.fa-fund--clickable:hover { box-shadow: 0 6px 18px rgba(11, 31, 61, 0.1); transform: translateY(-1px); }
+.fa-fund--clickable:focus-visible { outline: 2px solid var(--color-gold, #c29035); outline-offset: 2px; }
 
 .fa-fund__head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; padding: 18px 20px 14px; }
 .fa-fund__head h3 { margin: 0; font-size: 15px; font-weight: 600; color: var(--color-black); }
@@ -597,7 +601,6 @@ td.fa-table__fund em {
 }
 
 @media (max-width: 760px) {
-  .fa-funds { grid-template-columns: 1fr; }
   .fa-detail__layout, .fa-detail__body { grid-template-columns: minmax(0, 1fr); }
   .fa-detail__funds { flex-direction: row; overflow-x: auto; }
   .fa-detail__funds button { flex-shrink: 0; width: auto; }

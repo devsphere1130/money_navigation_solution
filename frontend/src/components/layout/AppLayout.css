@@ -1,6 +1,7 @@
 .app-layout { min-height: 100vh; }
 .app-layout__main { margin-left: 250px; min-height: 100vh; background: var(--color-white); }
-.app-layout__content { padding: 36px 40px 48px; max-width: 1240px; }
+/* Every page uses the full width of the screen. Pages limit their own text and forms where a long line would be hard to read. */
+.app-layout__content { padding: 36px 40px 48px; }
 .app-layout__backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.4); z-index: 25; }
 
 @media (max-width: 900px) {
