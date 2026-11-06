@@ -110,9 +110,19 @@ def fetch_fund_data(scheme_code: str, *, risk_free_rate: float = 0.065, include_
 
 def search_funds(query: str, limit: int = 25) -> dict[str, Any]:
     records = fetch_amfi_latest()
-    needle = query.strip().lower()
-    filtered = [record for record in records if needle in ' '.join(str(record.get(key) or '') for key in ('scheme_name', 'scheme_code', 'isin', 'amc', 'category')).lower()]
+    # Every word must appear, in any order. AMFI names sometimes carry repeated spaces, so spacing is ignored.
+    words = query.lower().split()
+    filtered = [
+        record for record in records
+        if all(word in ' '.join(' '.join(str(record.get(key) or '') for key in ('scheme_name', 'scheme_code', 'isin', 'amc', 'category')).lower().split()) for word in words)
+    ]
     filtered = [record for record in filtered if _is_direct_growth(record)] or filtered
+    # The typed phrase itself, then names starting with it, ahead of names that only contain every word.
+    phrase = ' '.join(words)
+    def rank(record):
+        name = ' '.join(str(record.get('scheme_name') or '').lower().split())
+        return (not name.startswith(phrase), phrase not in name)
+    filtered.sort(key=rank)
     as_of = max((record.get('date') for record in filtered if record.get('date')), default=None)
     return {'source': 'AMFI', 'asOfDate': _iso_date(as_of), 'results': filtered[:limit]}
 

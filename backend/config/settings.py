@@ -95,6 +95,15 @@ FUND_ANALYZER_PORTFOLIO_LOOKBACK_MONTHS = max(1, int(os.getenv('FUND_ANALYZER_PO
 FUND_ANALYZER_CHARLIE_ALPHA_ENABLED = os.getenv('FUND_ANALYZER_CHARLIE_ALPHA_ENABLED', 'false').strip().lower() in ('1', 'true', 'yes', 'on')
 FUND_ANALYZER_CHARLIE_ALPHA_URL = os.getenv('FUND_ANALYZER_CHARLIE_ALPHA_URL', 'https://api.charliealpha.in/v1').rstrip('/')
 # Upper bound on backup requests for one Update Analysis, so a large selection cannot flood the provider.
+# The backup source may supply only the newest of these completed months (October back to July on 6 November 2026).
+FUND_ANALYZER_CHARLIE_ALPHA_LOOKBACK_MONTHS = max(1, int(os.getenv('FUND_ANALYZER_CHARLIE_ALPHA_LOOKBACK_MONTHS', '4')))
+# Cache retention, used only by `manage.py cleanup_portfolio_cache`. Never below the lookbacks above.
+FUND_ANALYZER_CACHE_OFFICIAL_RETENTION_MONTHS = max(1, int(os.getenv('FUND_ANALYZER_CACHE_OFFICIAL_RETENTION_MONTHS', '12')))
+FUND_ANALYZER_CACHE_BACKUP_RETENTION_MONTHS = max(1, int(os.getenv('FUND_ANALYZER_CACHE_BACKUP_RETENTION_MONTHS', '6')))
+FUND_ANALYZER_CACHE_TEMP_FILE_HOURS = max(1, int(os.getenv('FUND_ANALYZER_CACHE_TEMP_FILE_HOURS', '24')))
+FUND_ANALYZER_CACHE_STATUS_RETENTION_DAYS = max(1, int(os.getenv('FUND_ANALYZER_CACHE_STATUS_RETENTION_DAYS', '30')))
+# Where official files past retention are moved. Without it they are kept, because they may not be downloadable again.
+FUND_ANALYZER_CACHE_ARCHIVE_DIR = os.getenv('FUND_ANALYZER_CACHE_ARCHIVE_DIR', '')
 FUND_ANALYZER_CHARLIE_ALPHA_MAX_REQUESTS = max(1, int(os.getenv('FUND_ANALYZER_CHARLIE_ALPHA_MAX_REQUESTS', '40')))
 # Verified holdings are JSON files here, not database rows. Vercel can only write to
 # its temporary folder, which is wiped between runs, so set this on a server with a disk.

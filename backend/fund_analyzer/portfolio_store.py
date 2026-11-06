@@ -17,7 +17,7 @@ import os
 import re
 import tempfile
 import time
-from collections import Counter
+from collections import Counter, OrderedDict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
@@ -61,6 +61,11 @@ MAX_DEBT_WEIGHT = 115
 ALIASES_FILE = Path(__file__).with_name('scheme_aliases.json')
 # Keeps a read-then-write in one worker together. Atomic writes protect across processes.
 _update_lock = Lock()
+# Parsed JSON, kept until the file on disk changes. An atomic write always swaps in a new file,
+# so its signature changes and the next read parses it again. Bounded so memory stays small.
+_parsed: OrderedDict[str, list[Any]] = OrderedDict()
+_parsed_lock = Lock()
+PARSED_CACHE_ENTRIES = 2048
 
 # How long to wait before asking a source again.
 RETRY_DELAYS = {
@@ -133,6 +138,49 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     return None
 
 
+def _signature(path: Path) -> tuple[int, int, int]:
+    info = os.stat(path)
+    return info.st_mtime_ns, info.st_size, info.st_ino
+
+
+def _read_entry(path: Path) -> list[Any] | None:
+    """[signature, payload, checks] for a JSON file, parsed once per version of the file."""
+    key = str(path)
+    try:
+        signature = _signature(path)
+    except FileNotFoundError:
+        with _parsed_lock:
+            _parsed.pop(key, None)
+        return None
+    except OSError:
+        payload = _read_json(path)
+        return None if payload is None else [None, payload, {}]
+    with _parsed_lock:
+        entry = _parsed.get(key)
+        if entry and entry[0] == signature:
+            _parsed.move_to_end(key)
+            return entry
+    payload = _read_json(path)
+    if payload is None:
+        return None
+    entry = [signature, payload, {}]
+    try:
+        # Only remember it if the file did not change while it was being read.
+        if _signature(path) == signature:
+            with _parsed_lock:
+                _parsed[key] = entry
+                while len(_parsed) > PARSED_CACHE_ENTRIES:
+                    _parsed.popitem(last=False)
+    except OSError:
+        pass
+    return entry
+
+
+def clear_read_cache() -> None:
+    with _parsed_lock:
+        _parsed.clear()
+
+
 def _valid_snapshot(payload: dict[str, Any] | None, month: str) -> bool:
     """Only a complete, sensible month may be used. Anything else counts as missing."""
     if not payload or payload.get('schema_version') != SCHEMA_VERSION or payload.get('validation_status') != VERIFIED or payload.get('month') != month:
@@ -169,7 +217,8 @@ def is_eligible_equity(record: dict[str, Any]) -> bool:
 def file_scheme_name(record: dict[str, Any]) -> str:
     """The name to look for inside AMC files, following any alias for a renamed scheme."""
     name = record.get('scheme_name') or ''
-    aliases = _read_json(ALIASES_FILE) or {}
+    entry = _read_entry(ALIASES_FILE)
+    aliases = entry[1] if entry else {}
     amc_aliases = aliases.get(record.get('amc') or '')
     name = (amc_aliases.get(name) if isinstance(amc_aliases, dict) else None) or name
     # AMFI adds this to the scheme name. The AMC's own file does not use it.
@@ -177,8 +226,15 @@ def file_scheme_name(record: dict[str, Any]) -> str:
 
 
 def read_snapshot(record: dict[str, Any], month: str) -> dict[str, Any] | None:
-    payload = _read_json(_portfolio_dir(record) / f'{month}.json')
-    return payload if _valid_snapshot(payload, month) else None
+    entry = _read_entry(_portfolio_dir(record) / f'{month}.json')
+    if entry is None:
+        return None
+    signature, payload, checks = entry
+    # Every read is still validated. The answer is remembered only for this exact version of the file.
+    if month not in checks or signature is None:
+        checks[month] = _valid_snapshot(payload, month)
+    # A copy, so a caller can never change what the next reader sees.
+    return dict(payload) if checks[month] else None
 
 
 def store_snapshot(record: dict[str, Any], code: str, month: str, result: dict[str, Any], *, source_url: str = '', payload: bytes | None = None, source_type: str = SOURCE_DOWNLOAD, validation: dict[str, Any] | None = None) -> None:
@@ -267,7 +323,8 @@ def stored_links(record: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def load_snapshot(snapshot_id: str) -> dict[str, Any]:
-    payload = _read_json(Path(snapshot_id))
+    entry = _read_entry(Path(snapshot_id))
+    payload = entry[1] if entry else None
     rows = (payload or {}).get('holdings') or []
     return {
         'holdings': {row['isin']: row['weight'] for row in rows},
@@ -291,7 +348,8 @@ def load_snapshot(snapshot_id: str) -> dict[str, Any]:
 
 
 def _read_status(record: dict[str, Any]) -> dict[str, Any]:
-    return _read_json(_portfolio_dir(record) / 'status.json') or {}
+    entry = _read_entry(_portfolio_dir(record) / 'status.json')
+    return dict(entry[1]) if entry else {}
 
 
 def discovery_due(record: dict[str, Any]) -> bool:

@@ -42,7 +42,7 @@ from .adapters import (
 )
 from .holdings import _check_workbook_payload, _download_portfolio_file, _holdings_from_link, _link_error_status, _overlap_debug_record, _read_equity_holdings, _reporting_date_from_frame, analyze_holdings_overlap, fetch_fund_holdings, import_portfolio_holdings
 from .ingestion import eligible_portfolios, run_ingestion
-from .portfolio_store import SOURCE_IMPORT, VERIFIED, _portfolio_dir, _write_json_atomic, coverage_report, discovery_due, file_scheme_name, portfolio_key, read_snapshot, record_status, source_status, store_snapshot, stored_links
+from .portfolio_store import SOURCE_IMPORT, VERIFIED, _portfolio_dir, clear_read_cache, _write_json_atomic, coverage_report, discovery_due, file_scheme_name, portfolio_key, read_snapshot, record_status, source_status, store_snapshot, stored_links
 from .providers import ProviderError, fetch_amfi_disclosure_directory
 
 LOCMEM = {'default': {'BACKEND': 'django.core.cache.backends.locmem.LocMemCache', 'LOCATION': 'pipeline-tests'}}
@@ -68,6 +68,8 @@ class PortfolioCacheMixin:
             starter.enable() if hasattr(starter, 'enable') else starter.start()
             self.addCleanup(starter.disable if hasattr(starter, 'disable') else starter.stop)
         cache.clear()
+        # Parsed files are remembered per process. Each test starts with none.
+        clear_read_cache()
 
     def month_files(self):
         return sorted(path for path in Path(self.cache_dir).rglob('*.json') if path.name != 'status.json')

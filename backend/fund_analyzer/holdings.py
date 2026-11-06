@@ -130,6 +130,17 @@ def _recent_portfolio_months() -> set[str]:
     return months
 
 
+def _backup_window(allowed: set[str] | None = None) -> set[str]:
+    """The completed months the backup source may supply: the newest FUND_ANALYZER_CHARLIE_ALPHA_LOOKBACK_MONTHS.
+
+    Taken from the official window, so on 6 November 2026 with the default of 4 it is October back
+    to July. allowed narrows it further, for example to one month in historical mode.
+    """
+    count = int(getattr(settings, 'FUND_ANALYZER_CHARLIE_ALPHA_LOOKBACK_MONTHS', 4))
+    window = set(sorted(_recent_portfolio_months(), reverse=True)[:count])
+    return window if allowed is None else window & set(allowed)
+
+
 def _amc_directory_name(amc_name: str) -> str:
     return re.sub(r'[^a-z0-9]+', '-', amc_name.lower()).strip('-')
 
@@ -1427,7 +1438,7 @@ def import_portfolio_holdings(scheme_code: str, portfolio_date: str, filename: s
     }
 
 
-ALL_SOURCES_UNAVAILABLE = 'Portfolio holdings unavailable from available data sources.'
+ALL_SOURCES_UNAVAILABLE = 'Portfolio holdings unavailable for a matching reporting month.'
 # A month-end disclosure can be dated the last business day, so allow a few days before the calendar end.
 MONTH_END_FROM_DAY = 25
 
@@ -1461,6 +1472,8 @@ def _holdings_from_charlie(code: str, month: str, link: dict[str, Any], debug: d
         raise charlie_alpha.CharlieError(charlie_alpha.DISABLED, 'Backup source is switched off')
     if record is None:
         raise ProviderError('Scheme is missing from the AMFI list')
+    if month not in _backup_window():
+        raise charlie_alpha.CharlieError(charlie_alpha.DATE_MISMATCH, f'{month} is outside the backup lookback')
     as_of = link['as_of']
     payload = charlie_alpha.fetch_holdings(record, as_of)
     asset_class = _asset_class(record)
@@ -1698,7 +1711,8 @@ def fetch_fund_holdings(code: str, record: dict[str, Any] | None) -> dict[str, A
     if not record:
         return empty
     amc_name = record.get('amc') or ''
-    stored = [link for link in stored_links(record) if charlie_alpha.enabled() or not link.get('third_party')]
+    backup_window = _backup_window()
+    stored = [link for link in stored_links(record) if not link.get('third_party') or (charlie_alpha.enabled() and link['month'] in backup_window)]
     try:
         links = [*stored, *_imported_links(amc_name, code), *_parsed_links(code)]
     except Exception as exc:
@@ -1725,7 +1739,7 @@ def fetch_fund_holdings(code: str, record: dict[str, Any] | None) -> dict[str, A
         yield from links
         if charlie_alpha.enabled():
             try:
-                yield from _charlie_links(record, recent_months)
+                yield from _charlie_links(record, backup_window)
             except charlie_alpha.CharlieError as exc:
                 logger.warning('Backup periods unavailable for scheme %s: %s', code, exc.code)
 
@@ -1889,6 +1903,7 @@ def analyze_holdings_overlap(scheme_codes: list[str], portfolio_month: str | Non
         }
     record_by_code = {str(row.get('scheme_code')): row for row in latest_records}
     recent_months = {portfolio_month} if historical_mode else _recent_portfolio_months()
+    backup_window = _backup_window(recent_months)
     fund_results = []
     debug_by_code: dict[str, dict[str, Any]] = {}
     links_by_code: dict[str, list[dict[str, str]]] = {}
@@ -1911,7 +1926,7 @@ def analyze_holdings_overlap(scheme_codes: list[str], portfolio_month: str | Non
             report('backup')
             backup_tried.add(code)
             try:
-                backup_cache[code] = _charlie_links(record_by_code[code], recent_months)
+                backup_cache[code] = _charlie_links(record_by_code[code], backup_window)
             except charlie_alpha.CharlieError as exc:
                 logger.warning('Backup periods unavailable for scheme %s: %s', code, exc.code)
                 backup_failed[code] = exc.code
@@ -1937,8 +1952,8 @@ def analyze_holdings_overlap(scheme_codes: list[str], portfolio_month: str | Non
             logger.warning('Portfolio holdings cache unavailable for %s: %s', code, exc)
             imported_links = []
             parsed_links = []
-        # Saved third-party copies are served only while the backup source is switched on.
-        stored = [link for link in stored_links(record) if charlie_alpha.enabled() or not link.get('third_party')]
+        # Saved third-party copies are served only while the backup source is on, and only inside its window.
+        stored = [link for link in stored_links(record) if not link.get('third_party') or (charlie_alpha.enabled() and link['month'] in backup_window)]
         name_by_code[code] = file_scheme_name(record)
         state = scheme_status(record)
         # A scheme that stopped reporting years ago has no recent portfolio to find. Its own
@@ -2011,16 +2026,25 @@ def analyze_holdings_overlap(scheme_codes: list[str], portfolio_month: str | Non
     loaded: dict[tuple[str, str], dict[str, Any] | None] = {}
     failed_links: set[tuple[str, str]] = set()
 
-    def load(code: str, month: str, comparing: bool = True) -> dict[str, Any] | None:
-        """This fund's first valid holdings for the month. Each file is tried at most once per analysis.
+    def is_backup(link: dict[str, Any]) -> bool:
+        return bool(link.get('charlie') or link.get('third_party'))
 
+    def load(code: str, month: str, comparing: bool = True, backup: bool = False) -> dict[str, Any] | None:
+        """This fund's first valid holdings for the month from one kind of source. Each file is tried once.
+
+        backup=False reads official files only. backup=True reads a saved third-party copy first, then
+        the backup API, and only inside the backup window. The two are never mixed for one fund-month.
         comparing=False reads a fund's own month only to report it. As before, that is not counted as
         an attempted comparison month, so a failure there never puts the fund's source into back-off.
         """
-        key = (code, month)
+        key = (code, month, backup)
         if loaded.get(key) is not None:
             return loaded[key]
-        candidates = [link for link in links_by_code[code] if link['month'] == month and (code, link['url']) not in failed_links]
+        if backup and month not in backup_window:
+            return None
+        candidates = [link for link in links_by_code[code] if link['month'] == month and is_backup(link) == backup and (code, link['url']) not in failed_links]
+        # A saved copy answers before a new request.
+        candidates.sort(key=lambda link: bool(link.get('charlie')))
         debug = debug_by_code[code]
         if comparing and candidates and month not in debug['attempted_months']:
             debug['attempted_months'].append(month)
@@ -2045,65 +2069,125 @@ def analyze_holdings_overlap(scheme_codes: list[str], portfolio_month: str | Non
         loaded[key] = None
         return None
 
-    def choose_months() -> tuple[list[str], list[str], str | None]:
+    def backup_has(code: str, month: str) -> bool:
+        """Can the backup supply this fund for this month? Asks the provider for its dates at most once."""
+        if not charlie_alpha.enabled() or month not in backup_window:
+            return False
+        if not any(is_backup(link) and link['month'] == month for link in links_by_code[code]) and code not in backup_cache:
+            links_by_code[code] = [*links_by_code[code], *backup_links(code)]
+        return any(is_backup(link) and link['month'] == month and (code, link['url']) not in failed_links for link in links_by_code[code])
+
+    def official_months_of(code: str) -> list[str]:
+        return sorted({link['month'] for link in links_by_code[code] if not is_backup(link)}, reverse=True)
+
+    def has_official_data(code: str) -> bool:
+        """Does any month within the window give this fund valid official holdings?"""
+        if any(code in valid and (valid[code].get('source_type') or charlie_alpha.SOURCE_OFFICIAL) == charlie_alpha.SOURCE_OFFICIAL for valid in valid_by_month.values()):
+            return True
+        return any(load(code, month, comparing=False) for month in official_months_of(code))
+
+    def choose_months() -> tuple[list[str], str | None]:
+        """The one month every comparable fund can be compared in, chosen in this order:
+
+        1. Official files for every fund, newest month first, within the official lookback.
+        2. Official files for every fund that has any, and the backup only for funds with none, newest
+           month first, within the backup lookback.
+        3. The backup for whichever fund lacks that specific month, even one with official data in another month.
+        Each fund-month is official or backup, never both, and a valid official portfolio is never replaced.
+        If no month suits every fund, the month common to every fund that can be compared at all.
+        """
         supported = list(links_by_code)
-        months = sorted((
-            month for month in {link['month'] for links in links_by_code.values() for link in links}
-            if sum(any(link['month'] == month for link in links_by_code[code]) for code in supported) >= 2
-        ), reverse=True)
-        chosen: str | None = None
-        for month in months:
-            valid = {}
-            for code in supported:
-                if any(link['month'] == month for link in links_by_code[code]):
-                    result = load(code, month)
-                    if result:
-                        valid[code] = result
+        official_months = [
+            month for month in sorted({link['month'] for code in supported for link in links_by_code[code] if not is_backup(link)}, reverse=True)
+            if sum(month in official_months_of(code) for code in supported) >= 2
+        ]
+        for month in official_months:
+            valid = {code: result for code in supported if month in official_months_of(code) and (result := load(code, month))}
             valid_by_month[month] = valid
             if len(supported) >= 2 and len(valid) == len(supported):
-                chosen = month
-                break
+                return supported, month
+        if len(supported) >= 2 and charlie_alpha.enabled():
+            backup_only = {code for code in supported if not has_official_data(code)}
+            for allowed in (backup_only, set(supported)):
+                for month in sorted(backup_window, reverse=True):
+                    valid = dict(valid_by_month.get(month, {}))
+                    valid.update({code: result for code in supported if code not in valid and (result := load(code, month))})
+                    missing = [code for code in supported if code not in valid]
+                    # Check everything that costs nothing before any portfolio is requested.
+                    if any(code not in allowed for code in missing) or not all(backup_has(code, month) for code in missing):
+                        valid_by_month[month] = valid
+                        continue
+                    for code in missing:
+                        result = load(code, month, backup=True)
+                        if not result:
+                            break
+                        valid[code] = result
+                    valid_by_month[month] = valid
+                    if len(valid) == len(supported):
+                        return supported, month
         # No month suits every fund that has files, but a fund whose files all failed, or that shares
         # no month with the rest, cannot be compared at all. Skip such funds and look again for a month
         # common to every fund that can be. Every month is already loaded here, so this costs nothing.
-        if chosen is None:
-            evaluable = {code for month in months for code in valid_by_month.get(month, {})}
-            if len(evaluable) >= 2:
-                chosen = next((month for month in months if evaluable <= set(valid_by_month.get(month, {}))), None)
-        return supported, months, chosen
+        evaluable = {code for valid in valid_by_month.values() for code in valid}
+        if len(evaluable) >= 2:
+            return supported, next((month for month in sorted(valid_by_month, reverse=True) if evaluable <= set(valid_by_month[month])), None)
+        return supported, None
 
-    def own_months(supported: list[str], months: list[str]) -> dict[str, tuple[str, dict[str, Any]]]:
+    def own_months(supported: list[str]) -> dict[str, tuple[str, dict[str, Any]]]:
         # A fund with no month in common is still a fund with valid holdings. Read its own latest
         # month so it is reported available, and leave "no common month" to the pair it affects.
         own = {}
         for code in supported:
-            if any(code in valid_by_month.get(month, {}) for month in months):
+            if any(code in valid for valid in valid_by_month.values()):
                 continue
-            for month in sorted({link['month'] for link in links_by_code[code]} - set(months), reverse=True):
-                result = load(code, month, comparing=False)
-                if result:
-                    own[code] = (month, result)
-                    break
+            months = sorted({link['month'] for link in links_by_code[code]}, reverse=True)
+            result = next(((month, data) for month in months if (data := load(code, month, comparing=False) or load(code, month, comparing=False, backup=True))), None)
+            if result:
+                own[code] = result
         return own
 
-    supported_codes, candidate_months, global_month = choose_months()
-    own_holdings = own_months(supported_codes, candidate_months)
+    def fund_month_data(code: str, month: str) -> dict[str, Any] | None:
+        """This fund's holdings for one month: what is already loaded, an official file, then the backup."""
+        valid = valid_by_month.setdefault(month, {})
+        if code not in valid:
+            result = load(code, month) or (load(code, month, backup=True) if backup_has(code, month) else None)
+            if result:
+                valid[code] = result
+        return valid.get(code)
 
-    # The backup source is only for a fund the official reader could not supply in ANY month. A fund
-    # with official holdings keeps them, even when a newer third-party month exists. Then choose again.
-    rescued = False
-    for code in supported_codes:
-        has_official = any(code in valid_by_month.get(month, {}) for month in candidate_months) or code in own_holdings
-        if has_official or any(link.get('charlie') for link in links_by_code[code]):
-            continue
-        extra = backup_links(code)
-        if extra:
-            links_by_code[code] = [*links_by_code[code], *extra]
-            rescued = True
-    if rescued:
-        valid_by_month.clear()
-        supported_codes, candidate_months, global_month = choose_months()
-        own_holdings = own_months(supported_codes, candidate_months)
+    def can_supply(code: str, month: str) -> bool:
+        if code in valid_by_month.get(month, {}):
+            return True
+        return any(not is_backup(link) and link['month'] == month and (code, link['url']) not in failed_links for link in links_by_code[code]) or backup_has(code, month)
+
+    def pair_month(left: str, right: str) -> str | None:
+        """The month this pair is compared in. Both funds always use the same month.
+
+        The month common to every fund comes first. Otherwise the pair's newest month with official
+        holdings on both sides, and only then its newest month where the backup fills one side.
+        """
+        if left not in links_by_code or right not in links_by_code:
+            return None
+        if global_month and left in valid_by_month.get(global_month, {}) and right in valid_by_month[global_month]:
+            return global_month
+        months = sorted(set(valid_by_month) | {link['month'] for code in (left, right) for link in links_by_code[code]}, reverse=True)
+        official = lambda month, code: ((valid_by_month.get(month, {}).get(code) or {}).get('source_type') or charlie_alpha.SOURCE_OFFICIAL) == charlie_alpha.SOURCE_OFFICIAL
+        for month in months:
+            valid = valid_by_month.get(month, {})
+            if left in valid and right in valid and official(month, left) and official(month, right):
+                return month
+        for month in months:
+            if can_supply(left, month) and can_supply(right, month) and fund_month_data(left, month) and fund_month_data(right, month):
+                return month
+        return None
+
+    supported_codes, global_month = choose_months()
+    own_holdings = own_months(supported_codes)
+    planned_months = {
+        (str(left), str(right)): pair_month(str(left), str(right))
+        for index, left in enumerate(scheme_codes) for right in scheme_codes[index + 1:]
+    }
+    candidate_months = sorted(valid_by_month, reverse=True)
 
     for fund in fund_results:
         code = fund['scheme_code']
@@ -2169,16 +2253,13 @@ def analyze_holdings_overlap(scheme_codes: list[str], portfolio_month: str | Non
     report('calculating')
     pairs = []
     unavailable_pairs = []
-    share_class_identities = _share_class_identities(latest_records)
+    # Built from every AMFI record, so only when a Fund of Funds pair actually needs it.
+    share_class_identities: dict[str, str] | None = None
     for left_index, left_code in enumerate(scheme_codes):
         for right_code in scheme_codes[left_index + 1:]:
             left_code, right_code = str(left_code), str(right_code)
-            pair_month = global_month or next((
-                month for month in candidate_months
-                if left_code in valid_by_month.get(month, {}) and right_code in valid_by_month[month]
-            ), None)
-            # A selected fund can be excluded (debt fund, unsupported AMC) even when
-            # the other funds share a common month, so check both funds are present.
+            pair_month = planned_months.get((left_code, right_code))
+            # A pair is compared only in one month that both funds reported.
             if not pair_month or left_code not in valid_by_month[pair_month] or right_code not in valid_by_month[pair_month]:
                 continue
             left_data = valid_by_month[pair_month][left_code]
@@ -2200,6 +2281,8 @@ def analyze_holdings_overlap(scheme_codes: list[str], portfolio_month: str | Non
             if not (classes <= set(left_data.get('classes_read') or []) and classes <= set(right_data.get('classes_read') or [])):
                 unavailable_pairs.append({'left': left_code, 'right': right_code, 'portfolio_month': pair_month, 'reason': REASON_HOLDINGS_UNAVAILABLE})
                 continue
+            if left_is_fof and share_class_identities is None:
+                share_class_identities = _share_class_identities(latest_records)
             comparison = _fof_pair_overlap(left_data, right_data, share_class_identities) if left_is_fof else _pair_overlap(left_data, right_data, classes)
             overlap_pct = comparison['overlap_pct']
             # Fund units are never part of a stock comparison, or of overlap_pct itself.
@@ -2265,7 +2348,7 @@ def analyze_holdings_overlap(scheme_codes: list[str], portfolio_month: str | Non
         highest_message = historical_message([fund.get('scheme_name') or fund['scheme_code'] for fund in fund_results if fund.get('reason_code') == REASON_HISTORICAL_UNAVAILABLE])
     else:
         highest_message = REASON_MESSAGES[reason_code] if has_debt else 'Portfolio holdings unavailable'
-    if not highest_pair and backup_tried and reason_code in (REASON_HOLDINGS_UNAVAILABLE, REASON_PARSER_UNSUPPORTED):
+    if not highest_pair and backup_tried and reason_code in (REASON_HOLDINGS_UNAVAILABLE, REASON_PARSER_UNSUPPORTED, REASON_NO_COMMON_MONTH):
         highest_message = ALL_SOURCES_UNAVAILABLE
     highest_overlap = {
         'available': highest_pair is not None,
@@ -2306,6 +2389,11 @@ def analyze_holdings_overlap(scheme_codes: list[str], portfolio_month: str | Non
         # Which kinds of source the figures came from. A third-party source is always named.
         'holdings_sources': sorted({fund['holdings_source'] for fund in fund_results if fund.get('holdings_source')}),
         'backup_enabled': charlie_alpha.enabled(),
+        # The months each source was allowed to supply, newest first.
+        'lookback': {
+            'official_months': sorted(recent_months, reverse=True),
+            'backup_months': sorted(backup_window, reverse=True) if charlie_alpha.enabled() else [],
+        },
         'funds': fund_results,
         'pairs': rounded_pairs,
         'unavailable_pairs': unavailable_pairs,

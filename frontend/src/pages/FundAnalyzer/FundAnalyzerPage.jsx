@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Blend, List, PieChart, Printer } from 'lucide-react';
+import { Blend, Download, List, PieChart } from 'lucide-react';
 import FundPicker from './components/FundPicker.jsx';
 import SummaryCards from './components/SummaryCards.jsx';
 import CompareTab from './components/CompareTab.jsx';
@@ -7,6 +7,8 @@ import OverlapTab from './components/OverlapTab.jsx';
 import FundamentalsTab from './components/FundamentalsTab.jsx';
 import { fundColor } from './fundData.js';
 import { compareFunds, getFundamentals, getHoldingsOverlapWithProgress } from '../../services/fundAnalyzerService.js';
+import { getUserEmail } from '../../services/authService.js';
+import { exportFundReport } from './exportFundReport.js';
 import './FundAnalyzerPage.css';
 
 const TABS = [
@@ -15,8 +17,33 @@ const TABS = [
   { key: 'fundamentals', label: 'Fundamentals', icon: PieChart, Component: FundamentalsTab },
 ];
 
+// The selection survives a page refresh. Each signed-in user has their own, and only Clear all forgets it.
+const storageKey = () => `mns_fund_analyzer:${getUserEmail() || 'guest'}`;
+const FUND_FIELDS = ['scheme_code', 'scheme_name', 'amc', 'category', 'plan', 'option', 'isin'];
+
+function readSaved() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(storageKey()) || 'null');
+    return saved && Array.isArray(saved.funds) ? { funds: saved.funds.filter((fund) => fund && fund.scheme_code), analyzed: Boolean(saved.analyzed) } : { funds: [], analyzed: false };
+  } catch {
+    return { funds: [], analyzed: false };
+  }
+}
+
+function writeSaved(funds, analyzed) {
+  try {
+    if (!funds.length) localStorage.removeItem(storageKey());
+    else localStorage.setItem(storageKey(), JSON.stringify({ funds: funds.map((fund) => Object.fromEntries(FUND_FIELDS.map((key) => [key, fund[key] ?? null]))), analyzed }));
+  } catch {
+    // Storage can be full or blocked. The page still works; only the refresh memory is lost.
+  }
+}
+
 export default function FundAnalyzerPage() {
-  const [selectedFunds, setSelectedFunds] = useState([]);
+  const [saved] = useState(readSaved);
+  const [selectedFunds, setSelectedFunds] = useState(saved.funds);
+  const [analyzed, setAnalyzed] = useState(saved.analyzed);
+  const [saving, setSaving] = useState(false);
   const [funds, setFunds] = useState([]);
   const [activeTab, setActiveTab] = useState('compare');
   const [loading, setLoading] = useState(false);
@@ -45,9 +72,9 @@ export default function FundAnalyzerPage() {
       .finally(() => { if (current()) setOverlapLoading(false); });
   };
 
-  const load = async () => {
-    setLoading(true); setError('');
-    const schemeCodes = selectedFunds.map((fund) => fund.scheme_code);
+  const load = async (fundsToLoad = selectedFunds) => {
+    setLoading(true); setError(''); setAnalyzed(true);
+    const schemeCodes = fundsToLoad.map((fund) => fund.scheme_code);
     loadOverlap(schemeCodes);
     try {
       const payload = await compareFunds(schemeCodes);
@@ -78,6 +105,25 @@ export default function FundAnalyzerPage() {
     return () => { cancelled = true; };
   }, [funds, fundMetadata]);
 
+  useEffect(() => { writeSaved(selectedFunds, analyzed); }, [selectedFunds, analyzed]);
+
+  // After a refresh, show the analysis again if it had been run for these funds.
+  useEffect(() => {
+    if (saved.analyzed && saved.funds.length) load(saved.funds);
+    // Runs once, on the first render only.
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const saveReport = async () => {
+    setSaving(true);
+    try {
+      await exportFundReport({ funds, overlap, overlapLoading, fundMetadata, fundamentalsLoading, source, asOfDate, riskFreeRate });
+    } catch (err) {
+      setError(`The report could not be saved: ${err.message || 'unknown error'}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   useEffect(() => { const handleKey = (event) => { if (event.key === '/' && !['INPUT', 'TEXTAREA'].includes(event.target.tagName)) { event.preventDefault(); document.querySelector('.fa-search__box input')?.focus(); } }; window.addEventListener('keydown', handleKey); return () => window.removeEventListener('keydown', handleKey); }, []);
 
   const { Component } = TABS.find((tab) => tab.key === activeTab);
@@ -88,8 +134,8 @@ export default function FundAnalyzerPage() {
     })
     : funds;
   return <div className="fa">
-    <header className="fa__header"><div><p className="fa__eyebrow"><i /> LIVE {source}</p><h1>Fund Analyzer</h1><p className="fa__sub">Compare live AMFI NAV history, returns, risk, holdings overlap and published fund metadata for the schemes you select.</p></div><div className="fa__actions"><button type="button" className="fa__action" onClick={() => window.print()}><Printer size={15} /> Print report</button></div></header>
-    <FundPicker selectedFunds={selectedFunds} onChange={setSelectedFunds} onClear={() => { overlapRequest.current += 1; setSelectedFunds([]); setFunds([]); setFundMetadata({}); setOverlap(null); setOverlapLoading(false); }} onUpdate={load} loading={loading} />
+    <header className="fa__header"><div><p className="fa__eyebrow"><i /> LIVE {source}</p><h1>Fund Analyzer</h1><p className="fa__sub">Compare live AMFI NAV history, returns, risk, holdings overlap and published fund metadata for the schemes you select.</p></div><div className="fa__actions"><button type="button" className="fa__action" onClick={saveReport} disabled={!funds.length || saving} title={funds.length ? 'Save this analysis as a PDF' : 'Run Update analysis first'}><Download size={15} /> {saving ? 'Saving…' : 'Save report'}</button></div></header>
+    <FundPicker selectedFunds={selectedFunds} onChange={setSelectedFunds} onClear={() => { overlapRequest.current += 1; setSelectedFunds([]); setAnalyzed(false); setFunds([]); setFundMetadata({}); setOverlap(null); setOverlapLoading(false); }} onUpdate={() => load()} loading={loading} />
     {error && <p className="fa-notice" role="alert">{error}</p>}
     {!funds.length && !loading ? <p className="fa-card fa__empty">Select AMFI schemes and press Update analysis to load live figures.</p> : <>{funds.length > 0 && <><SummaryCards funds={funds} overlap={overlap} overlapLoading={overlapLoading} overlapStage={overlapStage} /><div className="fa__tabbar"><nav className="fa__tabs" role="tablist">{TABS.map(({ key, label, icon: Icon }) => <button key={key} type="button" role="tab" aria-selected={activeTab === key} className={`fa__tab${activeTab === key ? ' fa__tab--active' : ''}`} onClick={() => setActiveTab(key)}><Icon size={15} /> {label}</button>)}</nav><span className="fa__navdate">{source} as of {asOfDate || '—'}</span></div><Component funds={displayedFunds} overlap={overlap} overlapLoading={overlapLoading} overlapStage={overlapStage} onHistoricalMonth={(month) => loadOverlap(funds.map((fund) => fund.scheme_code), month)} riskFreeRate={riskFreeRate} loading={fundamentalsLoading} error={fundamentalsError} /></>}</>}
     <p className="fa__disclaimer">Mutual fund investments are subject to market risks; read all scheme-related documents carefully. Past performance may or may not be sustained in future.</p>

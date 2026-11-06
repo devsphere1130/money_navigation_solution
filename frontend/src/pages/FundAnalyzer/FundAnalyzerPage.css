@@ -63,6 +63,7 @@
 }
 
 .fa__action:hover { background: #faf7f0; }
+.fa__action:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .fa__action--gold { border-color: #ead9b4; background: var(--fa-cream); color: #8a6420; }
 .fa__action--gold:hover { background: #f1e5cc; }

@@ -11,7 +11,7 @@ from .portfolio_store import SOURCE_CHARLIE, read_snapshot, store_snapshot, stor
 from .tests_pipeline import PortfolioCacheMixin, holdings_result
 
 RECENT = {'2026-10', '2026-09', '2026-08'}
-ALL_SOURCES = 'Portfolio holdings unavailable from available data sources.'
+ALL_SOURCES = 'Portfolio holdings unavailable for a matching reporting month.'
 
 
 def make_isin(prefix: str) -> str:
@@ -82,7 +82,7 @@ class FakeProvider:
 
 def official(record, months):
     """Verified official holdings already saved for these months: {month: {isin: weight}}."""
-    day = {'2026-10': '31', '2026-09': '30', '2026-08': '31'}
+    day = {'2026-10': '31', '2026-09': '30', '2026-08': '31', '2026-07': '31', '2026-06': '30', '2026-05': '31'}
     for month, weights in months.items():
         store_snapshot(record, record['scheme_code'], month, holdings_result(weights, f'{month}-{day[month]}'))
 

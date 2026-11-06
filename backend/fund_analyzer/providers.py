@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 AMFI_NAV_URL = 'https://portal.amfiindia.com/spages/NAVAll.txt'
 AMFI_HISTORY_DOWNLOAD_URL = 'https://portal.amfiindia.com/DownloadNAVHistoryReport_Po.aspx'
 AMFI_HISTORY_URL = 'https://www.amfiindia.com/api/nav-history'
+# After AMFI history fails for a scheme, go straight to the backup for this long instead of waiting again.
+AMFI_HISTORY_RETRY_SECONDS = 15 * 60
 AMFI_TER_URL = 'https://www.amfiindia.com/api/populate-te-rdata-revised'
 AMFI_TER_PAGE_URL = 'https://www.amfiindia.com/ter-of-mf-schemes'
 AMFI_DISCLOSURE_DIRECTORY_URL = 'https://www.amfiindia.com/online-center/portfolio-disclosure'
@@ -229,7 +231,22 @@ def fetch_amfi_history(scheme_code: str, start: date, end: date) -> list[dict[st
         return sorted(unique.values(), key=lambda row: row['date'])
 
     key = f'fund-analyzer:amfi:history:{scheme_code}:{start.isoformat()}:{end.isoformat()}'
-    return _cached_provider_value(key, load, ttl=86400, stale_ttl=604800)
+    failed_key = f'fund-analyzer:amfi:history-failed:{scheme_code}'
+    try:
+        if cache.get(failed_key):
+            raise ProviderError(f'AMFI history for scheme {scheme_code} failed recently; using the backup source')
+    except ProviderError:
+        raise
+    except Exception:
+        logger.exception('Fund Analyzer cache read failed for %s', failed_key)
+    try:
+        return _cached_provider_value(key, load, ttl=86400, stale_ttl=604800)
+    except ProviderError:
+        try:
+            cache.set(failed_key, True, timeout=AMFI_HISTORY_RETRY_SECONDS)
+        except Exception:
+            logger.exception('Fund Analyzer cache write failed for %s', failed_key)
+        raise
 
 
 def parse_amfi_history_text_data(text: str, scheme_code: str) -> list[dict[str, Any]]:

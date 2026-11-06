@@ -87,6 +87,54 @@ workers can't leave a half written file. Use a real disk in production: Vercel o
 offers a temporary folder that is wiped between runs, so there every cold start
 downloads again, and blocked AMCs have no cached copy to fall back on.
 
+**Cleaning the cache.** Cleanup never runs during a request. Run it on a schedule:
+
+```powershell
+python manage.py cleanup_portfolio_cache                       # dry run: lists what would go, changes nothing
+python manage.py cleanup_portfolio_cache --apply               # removes it
+python manage.py cleanup_portfolio_cache --apply --archive-dir D:\mns\portfolio_archive
+```
+
+The policy:
+
+| Kind | What happens |
+|---|---|
+| Always kept | A fund's newest official month, every month inside the official or backup lookback, staff uploads, anything a running job uses, and anything changed in the last hour. |
+| Official months | Past `FUND_ANALYZER_CACHE_OFFICIAL_RETENTION_MONTHS` (12), moved to the archive folder. Never deleted outright, because an AMC may not offer them again. Without an archive folder they are kept. |
+| Third-party months | Past `FUND_ANALYZER_CACHE_BACKUP_RETENTION_MONTHS` (6), deleted. |
+| Unreadable month files | Moved to the archive for inspection, or reported. |
+| Status files | Kept while their retry wait lasts. Removed once the wait is over and the last check is older than `FUND_ANALYZER_CACHE_STATUS_RETENTION_DAYS` (30). |
+| Temporary files | Removed after `FUND_ANALYZER_CACHE_TEMP_FILE_HOURS` (24). |
+| Finished jobs, empty folders | Removed. |
+
+`FUND_ANALYZER_CACHE_ARCHIVE_DIR` sets a default archive folder outside the cache folder. A lock file
+stops two cleanups running at once, and each item is checked again just before it is removed.
+
+**Weekly schedule (Windows).** `backend\scripts\cleanup_portfolio_cache.bat` runs the command with the
+project's virtual environment, the backend folder as working directory, the archive folder
+`D:\mns\portfolio_archive` and the log `D:\mns\logs\portfolio_cache_cleanup.log`. Run it with no
+arguments for a dry run. The scheduled task passes `--apply`.
+
+The task `MNS Portfolio Cache Cleanup` runs it every Sunday at 03:00. If the PC is off then, it runs at
+the next start. It stops after an hour, and a second copy never starts while one is running. It was
+registered with PowerShell (run once):
+
+```powershell
+$bat = 'D:\PROJECT\money_navigation_solution\backend\scripts\cleanup_portfolio_cache.bat'
+$action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument "/c `"$bat`" --apply" -WorkingDirectory 'D:\PROJECT\money_navigation_solution\backend'
+$trigger = New-ScheduledTaskTrigger -Weekly -WeeksInterval 1 -DaysOfWeek Sunday -At '03:00'
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 1) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+Register-ScheduledTask -TaskName 'MNS Portfolio Cache Cleanup' -Action $action -Trigger $trigger -Settings $settings
+```
+
+Check it with `Get-ScheduledTask 'MNS Portfolio Cache Cleanup' | Get-ScheduledTaskInfo`, run it now with
+`Start-ScheduledTask 'MNS Portfolio Cache Cleanup'`, and remove it with
+`Unregister-ScheduledTask 'MNS Portfolio Cache Cleanup'`. It runs only while the user is signed in. To run
+it signed out, open Task Scheduler, choose the task, and select "Run whether user is logged on or not".
+
+Each run appends to the log: date and time, mode, what was planned, every protected file and why, the
+files deleted and archived, skipped and failed items, space reclaimed, and the duration.
+
 **Filling the cache ahead of time (optional).** Holdings download when first
 requested, so this isn't required, but it makes the first request faster:
 
@@ -97,6 +145,26 @@ python manage.py portfolio_coverage --full
 
 It skips sources checked recently and waits longer after blocks and failures.
 Useful options are `--amc`, `--scheme`, `--force`, `--months` and `--max-seconds`.
+
+**Which month is used.** Official AMC files are always tried first, for at most
+`FUND_ANALYZER_PORTFOLIO_LOOKBACK_MONTHS` completed months (default 6: October back
+to May on 6 November 2026). The month is chosen in this order:
+
+1. The newest month in which every selected fund has a valid official portfolio.
+2. The newest month, within the backup window, in which every fund with official data
+   uses it and only funds with none at all use the Charlie Alpha backup.
+3. The newest month, within the backup window, in which the backup fills whichever fund
+   lacks that specific month, even if it has official data for another month.
+4. If no month suits every fund, each pair uses its newest shared month, official on
+   both sides first.
+
+The backup is off unless `FUND_ANALYZER_CHARLIE_ALPHA_ENABLED=true`, and may supply only
+the newest `FUND_ANALYZER_CHARLIE_ALPHA_LOOKBACK_MONTHS` completed months (default 4:
+October back to July). It lists a scheme's report dates first, then requests only the
+month-end portfolios it needs. A pair never combines two different months. A backup
+portfolio is saved as third-party JSON and never replaces an official month. If neither
+source gives a matching month, the screen shows `Portfolio holdings unavailable for a
+matching reporting month.`
 
 **Monitoring.** `GET /api/overlap/coverage` (staff only) and `portfolio_coverage`
 report verified schemes, the latest month per AMC, failures and funds needing

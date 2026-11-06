@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from urllib.parse import urlsplit
 
 from django.conf import settings
@@ -17,6 +19,15 @@ from .serializers import CompareRequestSerializer, CompareResponseSerializer, Fu
 from .services import compare_funds, compare_holdings_overlap, fetch_fund_data, fetch_fundamentals, search_funds
 
 
+logger = logging.getLogger(__name__)
+
+
+def _unavailable(message: str, exc: Exception, **extra) -> Response:
+    """A plain message for the client. The provider's own text, which can name hosts and URLs, goes to the log."""
+    logger.warning('Fund Analyzer provider error: %s', exc)
+    return Response({'detail': message, **extra}, status=503)
+
+
 class FundSearchView(APIView):
     authentication_classes = []
     permission_classes = [AllowAny]
@@ -32,7 +43,7 @@ class FundSearchView(APIView):
             payload['results'] = [FundSearchResultSerializer({'source': payload['source'], 'asOfDate': payload['asOfDate'], **row}).data for row in payload['results']]
             return Response(FundSearchResponseSerializer(payload).data)
         except ProviderError as exc:
-            return Response({'detail': str(exc), 'source': 'AMFI', 'asOfDate': None}, status=503)
+            return _unavailable('Fund search is temporarily unavailable. Please try again shortly.', exc, source='AMFI', asOfDate=None)
 
 
 class FundDetailView(APIView):
@@ -43,10 +54,16 @@ class FundDetailView(APIView):
 
     def get(self, request, scheme_code: str):
         try:
+            known = {str(record.get('scheme_code')) for record in fetch_amfi_latest()}
+        except ProviderError:
+            known = None
+        if known is not None and str(scheme_code) not in known:
+            return Response({'detail': 'Scheme not found', 'source': 'AMFI', 'asOfDate': None}, status=404)
+        try:
             payload = fetch_fund_data(scheme_code, include_history=False)
             return Response(FundDetailSerializer(payload).data)
         except ProviderError as exc:
-            return Response({'detail': str(exc), 'source': 'MFAPI (backup)', 'asOfDate': None}, status=503)
+            return _unavailable('Fund data is temporarily unavailable. Please try again shortly.', exc, source='MFAPI (backup)', asOfDate=None)
 
 
 class FundCompareView(APIView):
@@ -65,7 +82,7 @@ class FundCompareView(APIView):
             payload = compare_funds(validated['scheme_codes'], risk_free_rate if risk_free_rate is not None else settings.FUND_ANALYZER_RISK_FREE_RATE)
             return Response(CompareResponseSerializer(payload).data)
         except ProviderError as exc:
-            return Response({'detail': str(exc), 'source': 'MFAPI (backup)', 'asOfDate': None}, status=503)
+            return _unavailable('Fund data is temporarily unavailable. Please try again shortly.', exc, source='MFAPI (backup)', asOfDate=None)
 
 
 class FundFundamentalsView(APIView):
@@ -83,7 +100,7 @@ class FundFundamentalsView(APIView):
             payload['funds'] = [FundDetailSerializer(fund).data for fund in payload['funds']]
             return Response(payload)
         except ProviderError as exc:
-            return Response({'detail': str(exc), 'source': 'AMFI'}, status=503)
+            return _unavailable('Fund fundamentals are temporarily unavailable. Please try again shortly.', exc, source='AMFI')
 
 
 class FundOverlapView(APIView):
