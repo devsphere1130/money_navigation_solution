@@ -61,3 +61,11 @@ export async function refreshAccessToken() {
     return false;
   }
 }
+
+// Forgot password: the secret key plus the account's email set a new password (no sign-in needed).
+export function resetPassword({ email, key, newPassword, confirmPassword }) {
+  return apiRequest('/auth/reset-password/', {
+    method: 'POST',
+    body: { email: email.trim().toLowerCase(), key, new_password: newPassword, confirm_password: confirmPassword },
+  });
+}

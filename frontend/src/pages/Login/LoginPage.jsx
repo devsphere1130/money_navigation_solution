@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { ArrowRight, FileText, Lock, Mail, ShieldCheck, TrendingUp, Users } from 'lucide-react';
 import logo from '../../assets/images/logo-small.png';
 import InputField from '../../components/common/InputField.jsx';
+import ForgotPasswordModal from './ForgotPasswordModal.jsx';
 import { login } from '../../services/authService.js';
 import { validateLogin } from '../../utils/validators.js';
 import './LoginPage.css';
@@ -19,6 +20,7 @@ export default function LoginPage() {
   const [errors, setErrors] = useState({});
   const [serverError, setServerError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [resetOpen, setResetOpen] = useState(false);
 
   const handleChange = (e) => {
     const { name, value, type, checked } = e.target;
@@ -101,7 +103,7 @@ export default function LoginPage() {
             value={form.password}
             onChange={handleChange}
             error={errors.password}
-            labelAside={<a href="#" className="login__forgot">Forgot password?</a>}
+            labelAside={<button type="button" className="login__forgot" onClick={() => setResetOpen(true)}>Forgot password?</button>}
           />
 
           <label className="login__remember">
@@ -119,6 +121,8 @@ export default function LoginPage() {
           </p>
         </form>
       </section>
+
+      {resetOpen && <ForgotPasswordModal email={form.email} onClose={() => setResetOpen(false)} />}
     </main>
   );
 }
