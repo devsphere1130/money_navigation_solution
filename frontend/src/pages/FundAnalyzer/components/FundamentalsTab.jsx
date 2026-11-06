@@ -14,20 +14,23 @@ const expense = (fund, pending) => (fund.ter == null ? (pending ? '…' : '—')
 const aum = (fund, pending) => (fund.aum == null && pending ? '…' : crore(fund.aum));
 const upDown = (value) => (value == null ? '' : value >= 0 ? 'fa-up' : 'fa-down');
 const sourceDates = (fund) => [
-  fund.holdings_as_of && `Portfolio ${longDate(fund.holdings_as_of)}`,
+  fund.holdings_as_of && `Portfolio ${longDate(fund.holdings_as_of)}${fund.holdings_source ? ` (Holdings source: ${fund.holdings_source === 'charlie_alpha' ? 'Third-party API' : 'Official AMC'})` : ''}`,
   fund.ter_as_of && `Expense ${longDate(fund.ter_as_of)}`,
   fund.aum_as_of && `AUM quarter to ${longDate(fund.aum_as_of)}`,
 ].filter(Boolean).join(' · ');
 
-function Holdings({ holdings, pending, limit }) {
+const debtDetails = (holding) => [holding.instrument_type, holding.sector, holding.issuer, holding.rating, holding.excluded_from_overlap && 'Not in overlap'].filter(Boolean).join(' · ');
+
+function Holdings({ holdings, pending, limit, showDetails }) {
   if (pending) return <p className="fa-fund__empty">Loading holdings…</p>;
   if (!holdings?.length) return <p className="fa-fund__empty">Holdings are not available for this fund.</p>;
   const largest = holdings[0].weight || 1;
   return <ol className={`fa-fund__holdings${limit == null ? ' fa-fund__holdings--all' : ''}`}>
-    {(limit == null ? holdings : holdings.slice(0, limit)).map((holding, index) => <li key={holding.isin} className="fa-fund__holding">
+    {(limit == null ? holdings : holdings.slice(0, limit)).map((holding, index) => <li key={holding.isin || holding.name} className="fa-fund__holding">
       <span className="fa-fund__rank">{String(index + 1).padStart(2, '0')}</span>
       <div>
-        <p><span title={holding.isin}>{holding.name}</span><strong>{holding.weight.toFixed(2)}%</strong></p>
+        <p><span title={[holding.isin, debtDetails(holding)].filter(Boolean).join(' · ')}>{holding.name}</span><strong>{holding.weight.toFixed(2)}%</strong></p>
+        {showDetails && debtDetails(holding) && <small className="fa-fund__holding-meta">{debtDetails(holding)}</small>}
         <i><b style={{ width: `${(holding.weight / largest) * 100}%` }} /></i>
       </div>
     </li>)}
@@ -67,15 +70,23 @@ function FundCard({ fund, loading, onOpen }) {
   </article>;
 }
 
-function Allocation({ allocation }) {
-  const parts = [
+function Allocation({ allocation, assetClass }) {
+  const debtParts = [
+    { key: 'debt_securities', label: 'Debt securities', className: assetClass === 'hybrid' ? 'fa-detail__part--foreign' : 'fa-detail__part--indian' },
+    { key: 'other', label: 'Fund units, repo, cash & other', className: 'fa-detail__part--other' },
+  ];
+  const fofParts = [
+    { key: 'fund_units', label: 'Underlying fund units', className: 'fa-detail__part--indian' },
+    { key: 'other', label: 'Repo, cash & other', className: 'fa-detail__part--other' },
+  ];
+  const parts = assetClass === 'fof' ? fofParts : assetClass === 'hybrid' ? [{ key: 'equity', label: 'Equity', className: 'fa-detail__part--indian' }, ...debtParts] : assetClass === 'debt' ? debtParts : [
     { key: 'indian_equity', label: 'Indian equity', className: 'fa-detail__part--indian' },
     { key: 'international_equity', label: 'International equity', className: 'fa-detail__part--foreign' },
     { key: 'other', label: 'Debt, cash & other', className: 'fa-detail__part--other' },
   ];
   return <>
     <div className="fa-detail__bar" role="img" aria-label={parts.map((part) => `${part.label} ${allocation[part.key].toFixed(2)}%`).join(', ')}>
-      {parts.map((part) => <i key={part.key} className={part.className} style={{ width: `${allocation[part.key]}%` }} />)}
+      {parts.map((part) => <i key={part.key} className={part.className} style={{ width: `${Math.max(0, allocation[part.key])}%` }} />)}
     </div>
     <ul className="fa-detail__legend">
       {parts.map((part) => <li key={part.key}><i className={part.className} />{part.label} <strong>{allocation[part.key].toFixed(2)}%</strong></li>)}
@@ -88,7 +99,7 @@ function Sectors({ sectors }) {
   return <ul className="fa-detail__sectors">
     {sectors.map((sector) => <li key={sector.name}>
       <span title={sector.name}>{sector.name}</span>
-      <i><b className={sector.name === 'Others' ? 'fa-detail__sector--others' : ''} style={{ width: `${(sector.weight / largest) * 100}%` }} /></i>
+      <i><b className={sector.name === 'Others' ? 'fa-detail__sector--others' : ''} style={{ width: `${Math.max(0, sector.weight / largest) * 100}%` }} /></i>
       <strong>{sector.weight.toFixed(2)}%</strong>
     </li>)}
   </ul>;
@@ -99,6 +110,7 @@ function FundDetail({ fund, loading }) {
   const pending = isPending(fund, loading);
   const holdings = fund.holdings || [];
   const metrics = fund.metrics || {};
+  const isDebt = fund.asset_class === 'debt' || fund.asset_class === 'hybrid' || fund.asset_class === 'fof';
   const shown = showAll ? holdings.length : Math.min(DETAIL_HOLDINGS, holdings.length);
   const tags = [fund.category?.split(' - ').pop(), [fund.plan, fund.option].filter(Boolean).join(' · '), fund.scheme_type && `${fund.scheme_type} ended`].filter(Boolean);
   const facts = [
@@ -130,13 +142,13 @@ function FundDetail({ fund, loading }) {
     <div className="fa-detail__body">
       <section className="fa-detail__panel">
         <h4><ListOrdered size={14} /> {showAll ? `ALL ${holdings.length} HOLDINGS` : `TOP ${DETAIL_HOLDINGS} HOLDINGS`}{holdings.length > 0 && <small>{topShare(holdings, shown).toFixed(1)}% of portfolio</small>}</h4>
-        <Holdings holdings={holdings} pending={pending} limit={showAll ? null : DETAIL_HOLDINGS} />
+        <Holdings holdings={holdings} pending={pending} limit={showAll ? null : DETAIL_HOLDINGS} showDetails={isDebt} />
         {holdings.length > DETAIL_HOLDINGS && <button type="button" className="fa-detail__more" onClick={() => setShowAll(!showAll)}>{showAll ? `Show top ${DETAIL_HOLDINGS}` : `Show all ${holdings.length} holdings`}</button>}
       </section>
       <section className="fa-detail__panel">
         <h4><PieChart size={14} /> ASSET ALLOCATION</h4>
-        {fund.allocation ? <Allocation allocation={fund.allocation} /> : <p className="fa-fund__empty">{pending ? 'Loading allocation…' : 'Allocation is not available for this fund.'}</p>}
-        <h4 className="fa-detail__subhead"><BarChart3 size={14} /> SECTOR ALLOCATION</h4>
+        {fund.allocation ? <Allocation allocation={fund.allocation} assetClass={fund.asset_class} /> : <p className="fa-fund__empty">{pending ? 'Loading allocation…' : 'Allocation is not available for this fund.'}</p>}
+        <h4 className="fa-detail__subhead"><BarChart3 size={14} /> {isDebt ? 'INSTRUMENT ALLOCATION' : 'SECTOR ALLOCATION'}</h4>
         {fund.sectors?.length ? <Sectors sectors={fund.sectors} /> : <p className="fa-fund__empty">{pending ? 'Loading sectors…' : 'Sector split is not available for this fund.'}</p>}
       </section>
     </div>

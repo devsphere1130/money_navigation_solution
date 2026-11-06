@@ -7,9 +7,10 @@ from time import perf_counter
 from typing import Any
 
 from .analytics import correlation, metrics
-from .holdings import analyze_holdings_overlap, fetch_fund_holdings
+from .holdings import analyze_holdings_overlap, fetch_fund_holdings, scheme_status
 from .providers import (
     ProviderError,
+    plan_option_conflict,
     fetch_amfi_aum,
     fetch_amfi_history,
     fetch_amfi_latest,
@@ -53,7 +54,9 @@ def _pick_latest(records: list[dict[str, Any]], scheme_code: str) -> dict[str, A
 
 
 def _base_detail(record: dict[str, Any], *, source: str, as_of: str | None) -> dict[str, Any]:
+    state = scheme_status(record)
     return {
+        'scheme_status': state['status'], 'last_nav_date': state['last_nav_date'],
         'source': source, 'asOfDate': _iso_date(as_of), 'scheme_code': str(record.get('scheme_code')),
         'scheme_name': record.get('scheme_name'), 'amc': record.get('amc'), 'category': record.get('category'),
         'scheme_type': record.get('scheme_type'), 'plan': record.get('plan'), 'option': record.get('option'),
@@ -89,6 +92,12 @@ def fetch_fund_data(scheme_code: str, *, risk_free_rate: float = 0.065, include_
         try:
             payload = fetch_mfapi_data(scheme_code)
             meta, history = parse_mfapi(payload, scheme_code)
+            # One scheme code is one plan and one option. If AMFI and MFAPI disagree about which,
+            # MFAPI's NAV history is another fund's, and showing it would mix the two.
+            amfi_record = next((row for row in (latest_records or []) if str(row.get('scheme_code')) == str(scheme_code)), None)
+            conflict = plan_option_conflict(amfi_record, meta) if amfi_record else None
+            if conflict:
+                raise ProviderError(f'MFAPI data for scheme {scheme_code} is a different plan or option: {conflict}')
             latest = history[-1]
             result = _base_detail({**meta, **latest}, source='MFAPI (backup)', as_of=latest.get('date'))
             result.update({'ter': None, 'ter_as_of': None, 'aum': None, 'aum_unit': None, 'aum_as_of': None, 'history': history})
@@ -172,6 +181,7 @@ def fetch_fundamentals(scheme_codes: list[str]) -> dict[str, Any]:
         return result
 
     record_by_code = {str(record.get('scheme_code')): record for record in latest_records}
+
     with ThreadPoolExecutor(max_workers=2 + min(4, len(scheme_codes))) as pool:
         ter_future = pool.submit(fetch_amfi_ter_snapshot, scheme_codes, latest_records)
         aum_future = pool.submit(load_aum_values)
@@ -192,7 +202,7 @@ def fetch_fundamentals(scheme_codes: list[str]) -> dict[str, Any]:
                 holdings_by_code[code] = future.result()
             except Exception:
                 logger.exception('Fund Analyzer holdings lookup failed for %s', code)
-                holdings_by_code[code] = {'holdings': [], 'holdings_as_of': None, 'benchmark': None, 'allocation': None, 'sectors': [], 'riskometer': None}
+                holdings_by_code[code] = {'holdings': [], 'holdings_as_of': None, 'benchmark': None, 'allocation': None, 'sectors': [], 'riskometer': None, 'asset_class': None}
 
     funds = []
     for code in scheme_codes:
@@ -210,5 +220,5 @@ def fetch_fundamentals(scheme_codes: list[str]) -> dict[str, Any]:
     return {'source': 'AMFI', 'funds': funds}
 
 
-def compare_holdings_overlap(scheme_codes: list[str]) -> dict[str, Any]:
-    return analyze_holdings_overlap(scheme_codes)
+def compare_holdings_overlap(scheme_codes: list[str], portfolio_month: str | None = None, progress=None) -> dict[str, Any]:
+    return analyze_holdings_overlap(scheme_codes, portfolio_month, progress)

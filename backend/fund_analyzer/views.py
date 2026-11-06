@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 from django.conf import settings
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import AllowAny, IsAdminUser
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
-from .providers import ProviderError
 from .holdings import import_portfolio_holdings
+from .jobs import get_job, start_job
+from .portfolio_store import coverage_report
+from .providers import ProviderError, fetch_amfi_latest
 from .serializers import CompareRequestSerializer, CompareResponseSerializer, FundDetailSerializer, FundSearchResponseSerializer, FundSearchResultSerializer
 from .services import compare_funds, compare_holdings_overlap, fetch_fund_data, fetch_fundamentals, search_funds
 
@@ -15,6 +20,8 @@ from .services import compare_funds, compare_holdings_overlap, fetch_fund_data, 
 class FundSearchView(APIView):
     authentication_classes = []
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'fund_read'
 
     def get(self, request):
         query = str(request.query_params.get('q', '')).strip()
@@ -31,6 +38,8 @@ class FundSearchView(APIView):
 class FundDetailView(APIView):
     authentication_classes = []
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'fund_read'
 
     def get(self, request, scheme_code: str):
         try:
@@ -43,6 +52,8 @@ class FundDetailView(APIView):
 class FundCompareView(APIView):
     authentication_classes = []
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'fund_analysis'
 
     def post(self, request):
         request_serializer = CompareRequestSerializer(data=request.data)
@@ -60,6 +71,8 @@ class FundCompareView(APIView):
 class FundFundamentalsView(APIView):
     authentication_classes = []
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'fund_analysis'
 
     def post(self, request):
         request_serializer = CompareRequestSerializer(data=request.data)
@@ -76,20 +89,63 @@ class FundFundamentalsView(APIView):
 class FundOverlapView(APIView):
     authentication_classes = []
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'fund_analysis'
 
     def post(self, request):
         request_serializer = CompareRequestSerializer(data=request.data)
         if not request_serializer.is_valid():
             return Response({'detail': request_serializer.errors, 'available': False}, status=400)
         try:
-            return Response(compare_holdings_overlap(request_serializer.validated_data['scheme_codes']))
-        except ProviderError as exc:
-            return Response({'detail': str(exc), 'available': False}, status=503)
+            payload = compare_holdings_overlap(request_serializer.validated_data['scheme_codes'], request_serializer.validated_data.get('portfolio_month'))
+        except ProviderError:
+            return Response({'detail': 'Portfolio holdings unavailable', 'available': False}, status=503)
+        # File locations and error details are for the internal coverage report only.
+        payload.pop('debug', None)
+        return Response(payload)
+
+
+class FundOverlapJobView(APIView):
+    """Start (or join) an overlap job. Poll FundOverlapJobStatusView for its stage and result."""
+
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'fund_analysis'
+
+    def post(self, request):
+        request_serializer = CompareRequestSerializer(data=request.data)
+        if not request_serializer.is_valid():
+            return Response({'detail': request_serializer.errors, 'available': False}, status=400)
+        job = start_job(request_serializer.validated_data['scheme_codes'], request_serializer.validated_data.get('portfolio_month'))
+        return Response(_job_summary(job), status=202)
+
+
+class FundOverlapJobStatusView(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'fund_read'
+
+    def get(self, request, job_id):
+        job = get_job(job_id)
+        if job is None:
+            return Response({'detail': 'Overlap job not found or expired', 'status': 'missing'}, status=404)
+        return Response(_job_summary(job))
+
+
+def _job_summary(job):
+    summary = {key: job.get(key) for key in ('job_id', 'status', 'stage', 'message', 'error')}
+    if job.get('status') == 'done':
+        summary['result'] = job.get('result')
+    return summary
 
 
 class FundOverlapImportView(APIView):
     permission_classes = [IsAdminUser]
     parser_classes = [MultiPartParser, FormParser]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'fund_import'
 
     def post(self, request):
         uploaded = request.FILES.get('file')
@@ -97,14 +153,32 @@ class FundOverlapImportView(APIView):
             return Response({'detail': 'file, scheme_code and portfolio_date are required'}, status=400)
         if uploaded.size > 15 * 1024 * 1024:
             return Response({'detail': 'Portfolio disclosure file must be 15 MB or smaller'}, status=400)
+        # Kept as a note of where the file came from. This address is never downloaded.
+        source_url = str(request.data.get('source_url') or '')
+        if source_url and (len(source_url) > 1000 or urlsplit(source_url).scheme not in ('http', 'https')):
+            return Response({'detail': 'source_url must be a web address'}, status=400)
         try:
             result = import_portfolio_holdings(
                 str(request.data['scheme_code']),
                 str(request.data['portfolio_date']),
                 uploaded.name,
                 uploaded.read(),
-                str(request.data.get('source_url') or ''),
+                source_url,
             )
             return Response(result)
         except ProviderError as exc:
             return Response({'detail': str(exc)}, status=400)
+
+
+class PortfolioCoverageView(APIView):
+    """Internal report of which schemes have verified holdings, and what needs attention."""
+
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+        try:
+            return Response(coverage_report(fetch_amfi_latest()))
+        except ProviderError as exc:
+            return Response({'detail': str(exc)}, status=503)
+
+
