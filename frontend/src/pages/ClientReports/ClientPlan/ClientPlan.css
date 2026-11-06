@@ -1,5 +1,15 @@
 .plan {
   --plan-pad: 28px;
+  --color-blue: #16224b;
+}
+
+/* Cream page behind the white cards, as in the design */
+.app-layout__main:has(.plan) {
+  background: #f6f4ef;
+}
+
+.plan-section svg {
+  color: var(--color-yellow);
 }
 
 .plan-state {
@@ -140,6 +150,19 @@
 /* Let the plan use the full width instead of the layout's 1240px cap */
 .app-layout__content:has(.plan) {
   max-width: none;
+}
+
+/* Desktop, as in the design: 28px at both sides, the header bar runs the full width and the
+   cards / tabs / form stop at 1384px (1440px frame minus the 28px side padding), left aligned. */
+@media (min-width: 901px) {
+  .app-layout__content:has(.plan) {
+    padding-left: 28px;
+    padding-right: 28px;
+  }
+
+  .plan > :not(.plan__header):not(.plan-modal) {
+    max-width: 1384px;
+  }
 }
 
 @media (max-width: 900px) {
@@ -896,7 +919,7 @@
   box-shadow: 0 1px 2px rgba(11, 31, 61, 0.05);
 }
 
-.plan__stat-label {
+.plan__stat .plan__stat-label {
   display: flex;
   align-items: center;
   gap: 8px;

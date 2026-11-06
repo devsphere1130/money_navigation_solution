@@ -17,7 +17,12 @@ import './ClientPlan.css';
 
 const today = () => new Date().toISOString().slice(0, 10);
 const titleCase = (v) => v.toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
-const initials = (name) => name.split(' ').slice(0, 2).map((w) => w[0]).join('').toUpperCase();
+// "PRITESH VILAS SHAHA" -> first and last word, so the header reads "Mr. Pritesh Shaha" and the avatar "PS".
+const firstLast = (full) => {
+  const words = full.trim().split(/\s+/);
+  return words.length > 1 ? `${words[0]} ${words[words.length - 1]}` : words[0];
+};
+const initials = (full) => firstLast(full).split(' ').map((w) => w[0]).join('').toUpperCase();
 
 const DEFAULT_INSURANCE = { years: '40', lifeCover: '', healthCover: '', auto: false };
 const DEFAULT_RETIREMENT = {
@@ -65,7 +70,7 @@ export default function ClientPlanPage() {
         if (!c) throw new Error('Client plan not found.');
         const defaults = {
           info: {
-            clientName: `${c.title.toUpperCase()} ${c.full_name.toUpperCase()}`,
+            clientName: c.full_name.toUpperCase(),
             spouseName: '',
             phone: c.mobile || '',
             email: c.email || '',
@@ -99,10 +104,11 @@ export default function ClientPlanPage() {
   const tab = TABS[active];
   const prev = TABS[active - 1];
   const next = TABS[active + 1];
-  const name = `${client.title}. ${titleCase(client.full_name)}`;
+  const name = `${client.title}. ${titleCase(firstLast(client.full_name))}`;
   const incomeAmount = incomeTotal(income);
   const expensesAmount = expensesTotal(expenses);
-  const savingsAmount = incomeAmount - expensesAmount - savingsTotal(savings);
+  const savingsAmount = incomeAmount - expensesAmount; // the "Savings / mo" card
+  const surplusAmount = savingsAmount - savingsTotal(savings); // what is left after the monthly investments
   const assets = assetsTotal(assetData);
   const personalAssets = personalAssetsTotal(assetData);
   const liabilities = liabilitiesTotal(liabilityData);
@@ -311,7 +317,7 @@ export default function ClientPlanPage() {
           onRetirementChange={setRetirement}
           goals={goals}
           onGoalsChange={setGoals}
-          surplusAmount={savingsAmount}
+          surplusAmount={surplusAmount}
           insurance={insurance}
           onInsuranceChange={setInsurance}
           liabilitiesAmount={liabilities}
