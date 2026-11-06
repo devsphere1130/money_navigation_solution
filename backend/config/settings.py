@@ -135,8 +135,12 @@ REST_FRAMEWORK = {
         'fund_read': '120/min',
         'fund_analysis': '30/min',
         'fund_import': '30/hour',
+        'password_reset': '10/hour',
     },
 }
+
+# Secret typed in the login page's "Forgot password?" pop-up. Empty switches the feature off.
+PASSWORD_RESET_KEY = os.getenv('PASSWORD_RESET_KEY', '')
 
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(minutes=30),
